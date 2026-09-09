@@ -1,0 +1,53 @@
+# Starts PostgreSQL/PostGIS + the FastAPI backend.
+# The frontend is intentionally NOT in this compose file — it's a static
+# HTML file with no build step, so it runs separately (see README "Run
+# locally"): `cd frontend && python3 -m http.server 5500`.
+#
+# Usage:
+#   docker compose up -d          # start db + backend
+#   docker compose exec db psql -U around -d around -f /seed.sql   # optional demo data, after migrations
+#   docker compose logs -f backend
+#   docker compose down           # stop
+#   docker compose down -v        # stop AND wipe the database volume
+
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: around
+      POSTGRES_PASSWORD: around
+      POSTGRES_DB: around
+    ports:
+      - "5432:5432"
+    volumes:
+      - around_db_data:/var/lib/postgresql/data
+      - ./backend/schema.sql:/docker-entrypoint-initdb.d/1-schema.sql:ro
+      - ./backend/seed.sql:/seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U around -d around"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ENV: development
+      DATABASE_URL: postgresql+asyncpg://around:around@db:5432/around
+      JWT_SECRET: ${JWT_SECRET:-dev-only-change-me}
+      JWT_ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: "20160"
+      CORS_ORIGINS: '["http://localhost:5500","http://127.0.0.1:5500"]'
+      DEFAULT_CITY: Vilnius
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app   # live-reload friendly for local dev; drop this in production
+
+volumes:
+  around_db_data:

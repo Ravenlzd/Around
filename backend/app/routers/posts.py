@@ -1,0 +1,52 @@
+"""
+Real-time spontaneous posts (spec §8) — the lightweight "real-time
+social layer over the physical city." Always ephemeral: every post
+carries an expires_at set at creation from the caller-chosen TTL.
+"""
+from datetime import datetime, timedelta, timezone
+
+from fastapi import APIRouter, Depends
+from geoalchemy2.functions import ST_MakePoint, ST_SetSRID, ST_DistanceSphere
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.database import get_db
+from app.models import SpontaneousPost, User
+from app.schemas import SpontaneousPostCreate
+from app.deps import get_current_user
+
+router = APIRouter()
+
+
+@router.post("", status_code=201)
+async def create_post(payload: SpontaneousPostCreate, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    post = SpontaneousPost(
+        user_id=user.id,
+        city_id=user.city_id,
+        body=payload.body,
+        location=ST_SetSRID(ST_MakePoint(payload.longitude, payload.latitude), 4326),
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=payload.expires_in_minutes),
+    )
+    db.add(post)
+    await db.commit()
+    return {"id": str(post.id), "expires_at": post.expires_at.isoformat()}
+
+
+@router.get("/nearby")
+async def nearby_posts(lat: float, lng: float, radius_km: float = 5, db: AsyncSession = Depends(get_db)):
+    user_point = ST_SetSRID(ST_MakePoint(lng, lat), 4326)
+    distance_m = ST_DistanceSphere(SpontaneousPost.location, user_point)
+    stmt = (
+        select(SpontaneousPost, (distance_m / 1000).label("distance_km"))
+        .where(
+            SpontaneousPost.expires_at > datetime.now(timezone.utc),
+            distance_m <= radius_km * 1000,
+        )
+        .order_by(SpontaneousPost.created_at.desc())
+        .limit(50)
+    )
+    rows = (await db.execute(stmt)).all()
+    return [
+        {"id": str(p.id), "body": p.body, "distance_km": round(d, 2), "expires_at": p.expires_at.isoformat()}
+        for p, d in rows
+    ]

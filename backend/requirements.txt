@@ -1,0 +1,28 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+sqlalchemy[asyncio]==2.0.35
+asyncpg==0.29.0
+alembic==1.13.2
+geoalchemy2==0.15.2
+pydantic[email]==2.9.2
+pydantic-settings==2.5.2
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1  # REAL BUG FOUND via live Postgres integration run: passlib 1.7.4's
+               # internal bcrypt-backend self-test crashes against bcrypt>=4.1
+               # (bcrypt dropped the `__about__` attribute passlib probes for, and
+               # bcrypt 5.x's stricter 72-byte check turns passlib's internal wrap-
+               # bug detection routine into a hard ValueError instead of a no-op).
+               # Pinning bcrypt to a version passlib 1.7.4 actually supports fixes
+               # password hashing/verification outright — this was never caught by
+               # any earlier session's testing because none of them had a real
+               # Python environment to install into.
+python-multipart==0.0.9
+pillow==10.4.0  # optional: enables image-dimension validation in app/routers/media.py; upload still works (minus that one check) if this isn't installed
+google-auth==2.34.0
+apscheduler==3.10.4
+
+# test-only (not needed to run the app itself)
+pytest==8.3.3
+pytest-asyncio==0.24.0
+httpx==0.27.2
