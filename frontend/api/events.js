@@ -6,7 +6,7 @@
 // actions in the app ARE allowed to update instantly (none of the
 // capacity-sensitive ones below) vs which wait on this promise to
 // resolve.
-import { apiClient, ApiError } from "./client.js";
+import { apiClient, ApiError, getWebSocketBase } from "./client.js";
 
 /**
  * @param {{lat: number, lng: number, radiusKm?: number, category?: string, limit?: number, offset?: number}} params
@@ -189,7 +189,7 @@ export async function sendChatMessage(eventId, body) {
  * always call it when the event sheet closes.
  */
 export async function openChatSocket(eventId, { onMessage, onError, onOpen, onStatus } = {}) {
-  const wsBase = (window.AROUND_API_BASE || "http://localhost:8000").replace(/^http/, "ws");
+  const wsBase = getWebSocketBase();
   let ws = null;
   let closedByCaller = false;
   let attempt = 0;

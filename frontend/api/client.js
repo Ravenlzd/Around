@@ -21,7 +21,29 @@
 // httpOnly refresh-token cookie issued by the backend) is the normal
 // choice; adapt `TokenStore` below if you go that route.
 
-export const API_BASE = window.AROUND_API_BASE || "http://localhost:8000";
+const LOCAL_HOSTNAMES = new Set(["", "localhost", "127.0.0.1"]);
+const LOCAL_API_BASE = "http://localhost:8000";
+const PRODUCTION_API_BASE = "https://around-1ouj.onrender.com";
+
+function withoutTrailingSlash(url) {
+  return url.replace(/\/+$/, "");
+}
+
+export function resolveApiBase({ hostname, configuredBase } = {}) {
+  const configured = configuredBase ?? window.AROUND_API_BASE;
+  if (configured) return withoutTrailingSlash(configured);
+
+  const currentHostname = hostname ?? window.location.hostname;
+  return LOCAL_HOSTNAMES.has(currentHostname) ? LOCAL_API_BASE : PRODUCTION_API_BASE;
+}
+
+export const API_BASE = resolveApiBase();
+
+export function getWebSocketBase(apiBase = API_BASE) {
+  const url = new URL(apiBase);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  return url.origin;
+}
 
 const TOKEN_KEY = "around:auth_token";
 

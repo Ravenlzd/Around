@@ -17,8 +17,8 @@ import * as MediaApi from './api/media.js';
    actions are never optimistic; only cosmetic ones (opening a sheet,
    toggling a filter chip) update instantly.
 
-   Set window.AROUND_API_BASE before this script runs to point at a
-   non-default backend URL; defaults to http://localhost:8000.
+   Set window.AROUND_API_BASE before this script runs to override the
+   hostname-aware API base selected by api/client.js.
    ============================================================ */
 
 const CATS = {
