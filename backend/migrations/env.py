@@ -29,12 +29,12 @@ from alembic import context
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from app.config import settings
+from app.config import get_async_database_url, settings
 from app.database import Base
 from app import models  # noqa: F401 — ensures all models are registered on Base.metadata
 
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+config.set_main_option("sqlalchemy.url", get_async_database_url(settings.DATABASE_URL))
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)

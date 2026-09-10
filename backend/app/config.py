@@ -1,4 +1,13 @@
 from pydantic_settings import BaseSettings
+from sqlalchemy.engine import make_url
+
+
+def get_async_database_url(database_url: str) -> str:
+    """Return a PostgreSQL URL suitable for SQLAlchemy's async engine."""
+    url = make_url(database_url)
+    if url.drivername == "postgresql":
+        return url.set(drivername="postgresql+asyncpg").render_as_string(hide_password=False)
+    return database_url
 
 
 class Settings(BaseSettings):
