@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Environment / secrets — never commit real values, only .env.example
+.env
+.env.local
+.env.*.local
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Logs
+*.log

@@ -1,0 +1,80 @@
+name: CI
+
+# Runs the project's REAL test suite — not mocks — against a disposable
+# Postgres/PostGIS service container matching docker-compose.yml's image
+# (postgis/postgis:16-3.4). Every step here was verified by hand against
+# a real Postgres instance before this file was written — see the "CI"
+# section of the pass that added this workflow for exact commands/output,
+# including a real bug this exact sequence caught (multi-statement
+# op.execute() failing against asyncpg's prepared-statement protocol —
+# fixed in migrations/versions/0001_initial.py).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      db:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: around
+          POSTGRES_PASSWORD: around
+          POSTGRES_DB: around_ci
+        ports:
+          - 5432:5432
+        # Waits until Postgres is actually accepting connections before
+        # any job step runs — matches the healthcheck already used in
+        # docker-compose.yml (pg_isready), just expressed the way GitHub
+        # Actions service containers expect it.
+        options: >-
+          --health-cmd "pg_isready -U around -d around_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # A dedicated, disposable database — never the developer's local
+      # `around` database, and never shared with any other job/run.
+      DATABASE_URL: postgresql+asyncpg://around:around@localhost:5432/around_ci
+      JWT_SECRET: ci-only-secret-not-used-anywhere-else-32chars
+      ENV: testing
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt
+
+      - name: Apply Alembic migrations (from a clean database)
+        working-directory: backend
+        run: python3 -m alembic upgrade head
+
+      - name: Run pure-logic unit tests (no database)
+        working-directory: backend
+        run: python3 -m unittest tests.test_attendance_rules -v
+
+      - name: Run real integration tests (against live Postgres/PostGIS)
+        working-directory: backend
+        run: python3 -m pytest tests/test_api_integration.py -v
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Frontend syntax check
+        working-directory: frontend
+        run: node --check app.js
