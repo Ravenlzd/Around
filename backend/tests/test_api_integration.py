@@ -367,3 +367,55 @@ class TestEventUpdateAndCancel:
         assert r.status_code == 200
         notifs = await client.get("/notifications", headers={"Authorization": f"Bearer {waiter_token}"})
         assert any(n["type"] == "event_cancelled" for n in notifs.json())
+
+    @pytest.mark.asyncio
+    async def test_cannot_join_waitlist_on_cancelled_event(self, client, city_id):
+        _, host_token = await _make_user(city_id, "CwHost")
+        event_id = await _make_event(client, host_token, capacity=1)
+        await client.post(f"/events/{event_id}/cancel", headers={"Authorization": f"Bearer {host_token}"})
+        _, waiter_token = await _make_user(city_id, "CwWaiter")
+        r = await client.post(f"/events/{event_id}/waitlist", headers={"Authorization": f"Bearer {waiter_token}"})
+        assert r.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_cannot_invite_guest_on_cancelled_event(self, client, city_id):
+        _, host_token = await _make_user(city_id, "CgHost")
+        event_id = await _make_event(client, host_token, capacity=5, guest_policy="one")
+        await client.post(f"/events/{event_id}/cancel", headers={"Authorization": f"Bearer {host_token}"})
+        r = await client.post(f"/events/{event_id}/guests", json={"guest_name": "Plus One"}, headers={"Authorization": f"Bearer {host_token}"})
+        assert r.status_code == 409
+
+    @pytest.mark.asyncio
+    async def test_cannot_chat_on_cancelled_event(self, client, city_id):
+        _, host_token = await _make_user(city_id, "CcHost")
+        event_id = await _make_event(client, host_token, capacity=5)
+        # host is auto-attending as the event creator, so posting works pre-cancel...
+        pre = await client.post(f"/events/{event_id}/chat", json={"body": "before cancel"}, headers={"Authorization": f"Bearer {host_token}"})
+        assert pre.status_code == 201
+        await client.post(f"/events/{event_id}/cancel", headers={"Authorization": f"Bearer {host_token}"})
+        # ...but not after
+        post = await client.post(f"/events/{event_id}/chat", json={"body": "after cancel"}, headers={"Authorization": f"Bearer {host_token}"})
+        assert post.status_code == 409
+        # chat HISTORY must remain readable — cancellation doesn't erase it
+        history = await client.get(f"/events/{event_id}/chat", headers={"Authorization": f"Bearer {host_token}"})
+        assert history.status_code == 200
+        assert any(m["body"] == "before cancel" for m in history.json())
+
+    @pytest.mark.asyncio
+    async def test_cannot_approve_request_on_cancelled_event(self, client, city_id):
+        _, host_token = await _make_user(city_id, "CaHost")
+        event_id = await _make_event(client, host_token, capacity=5, access_mode="approval")
+        _, requester_token = await _make_user(city_id, "CaRequester")
+        req = await client.post(f"/events/{event_id}/join-requests", json={}, headers={"Authorization": f"Bearer {requester_token}"})
+        request_id = req.json()["id"]
+        await client.post(f"/events/{event_id}/cancel", headers={"Authorization": f"Bearer {host_token}"})
+        r = await client.post(f"/events/{event_id}/join-requests/{request_id}/approve", headers={"Authorization": f"Bearer {host_token}"})
+        assert r.status_code == 409
+
+    @pytest.mark.asyncio
+    async def test_cannot_check_in_on_cancelled_event(self, client, city_id):
+        _, host_token = await _make_user(city_id, "CiHost")
+        event_id = await _make_event(client, host_token, capacity=5)
+        await client.post(f"/events/{event_id}/cancel", headers={"Authorization": f"Bearer {host_token}"})
+        r = await client.post(f"/events/{event_id}/check-in", json={"method": "manual"}, headers={"Authorization": f"Bearer {host_token}"})
+        assert r.status_code == 409

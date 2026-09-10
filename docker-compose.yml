@@ -5,7 +5,7 @@
 #
 # Usage:
 #   docker compose up -d          # start db + backend
-#   docker compose exec db psql -U around -d around -f /seed.sql   # optional demo data, after migrations
+#   docker compose exec db psql -U around -d around -f /seed.sql   # required, not optional — see README §1 (registration fails without the city row this creates)
 #   docker compose logs -f backend
 #   docker compose down           # stop
 #   docker compose down -v        # stop AND wipe the database volume

@@ -35,13 +35,15 @@ cd backend
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-psql postgresql://around:around@localhost:5432/around -f seed.sql   # optional demo data
+psql postgresql://around:around@localhost:5432/around -f seed.sql   # NOT optional — see note below
 uvicorn app.main:app --reload    # → http://localhost:8000/docs
 
 # separate terminal
 cd frontend
 python3 -m http.server 5500      # → http://localhost:5500
 ```
+
+**`seed.sql` isn't actually optional the way earlier notes here implied** — verified by trying to skip it: `POST /auth/signup` rejects every registration with `"City 'Vilnius' is not live yet"` on a fresh database, because `signup()` requires a matching row in `cities` and nothing else creates one. `seed.sql`'s first statement is exactly that `cities` row; the realistic demo users/events after it are the part that's genuinely optional flavor. Run the whole file — splitting it isn't worth the trouble for one row.
 
 Open `http://localhost:5500`, register a real account, and use the app. Refreshing the browser keeps you signed in and everything you did stays exactly as it was — because it's now in Postgres, not in a JS array. See §3 for the full walkthrough (including the alternate path where the backend also runs in Docker).
 
@@ -117,7 +119,7 @@ Apply the schema one of two ways:
 - **Existing database, or after a schema change**: `cd backend && alembic upgrade head`. See `backend/migrations/env.py` for why both paths exist and how they're kept in sync.
 
 ```bash
-psql postgresql://around:around@localhost:5432/around -f seed.sql   # optional — populates scenarios A–G
+psql postgresql://around:around@localhost:5432/around -f seed.sql   # required — see §1's note; not just "populates scenarios A–G"
 uvicorn app.main:app --reload
 # → http://localhost:8000/docs for interactive API docs
 # → http://localhost:8000/health for a liveness check
@@ -128,7 +130,7 @@ uvicorn app.main:app --reload
 ```bash
 docker compose up -d          # starts db AND backend
 docker compose logs -f backend
-docker compose exec db psql -U around -d around -f /seed.sql   # optional demo data
+docker compose exec db psql -U around -d around -f /seed.sql   # required — see §1
 ```
 
 The backend container mounts `./backend` as a live-reload volume for local dev (see `docker-compose.yml` comments) — drop that volume mount for a real deployment image.
@@ -226,6 +228,8 @@ The 46 pure-logic unit tests (`tests/test_attendance_rules.py`) also still pass,
 
 **What this does and doesn't change about testing honesty going forward**: this was one real run in one sandboxed session's environment, not a permanently available CI setup — a future session may or may not have the same network/DB access. Don't assume the integration suite has "always passed" without checking; check what's actually reachable each time, the way this pass did before claiming anything.
 
+*Update from the hardening pass that followed (§3e): that caution turned out to matter in both directions — the next session's environment did still have real Postgres access, and used it to find and fix a real migration bug this exact run had never exercised (this pytest run above reused an already-schema'd database; `alembic upgrade head` against a genuinely empty one failed until §3e's fix). The suite has since grown to 28 integration tests (the 5 newest specifically closing gaps this snapshot didn't cover), all currently passing against a database created via the real migration path, not a hand-applied one.*
+
 ## 4. Architecture
 
 
@@ -257,15 +261,15 @@ Native WebSocket client (event chat)             WebSocket endpoint for chat fan
 
 ### Expiry job
 
-Not included as a running process in this package — add an APScheduler job (already in `requirements.txt`) or a `pg_cron` job that runs every minute or two:
+**Implemented and running** — this is not documentation the deployer has to act on. `app/expiry.py`'s `expiry_loop()` starts as a real `asyncio` background task inside `app/main.py`'s FastAPI `lifespan`, and sweeps every 60 seconds for as long as the process runs. No external scheduler, no Celery, no `pg_cron` — one task in the same process, which is correct and sufficient for this MVP's single-instance deployment target. Each sweep:
 
 ```sql
 DELETE FROM spontaneous_posts WHERE expires_at < now();
 DELETE FROM im_free_status WHERE expires_at < now();
 
--- waitlist offers that timed out unclaimed — flip to 'expired', then call
--- _offer_next_waitlist_spot() (app/routers/events.py) for each affected
--- event so the spot cascades to the next person immediately:
+-- waitlist offers that timed out unclaimed — flip to 'expired', then
+-- _offer_next_waitlist_spot() (app/routers/events.py) is called for each
+-- affected event so the spot cascades to the next person immediately:
 UPDATE event_waitlist SET status = 'expired'
   WHERE status = 'offered' AND offer_expires_at < now();
 
@@ -273,6 +277,8 @@ UPDATE event_waitlist SET status = 'expired'
 UPDATE guest_invitations SET status = 'expired'
   WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < now();
 ```
+
+If this ever needs to run across multiple backend replicas without every replica's timer doing the sweep redundantly, wrap the loop body in a `pg_try_advisory_lock` so only one replica's tick does the work — a guard clause, not a new piece of infrastructure.
 
 ### Real-time chat
 
@@ -356,7 +362,23 @@ Both conditions are required for the checkmark — a host with one great event a
 - **Object storage**: S3 or Cloudflare R2 for event cover images and avatars, once upload is actually wired up (§4a) — sign upload URLs server-side.
 - **Secrets**: JWT secret, OAuth client secrets, storage keys — all via the deployment platform's secret manager, never committed (`.env` is gitignored; `.env.example` shows the shape).
 
-## 9. What's next
+## 3e. Final hardening pass: CI, a real migration bug, and an authorization audit
+
+This pass worked directly against the actual GitHub repository (cloned fresh via `git clone`, diffed against prior working state before changing anything — they matched exactly except for the expiry-job correction above, which confirms the repo and this document's history are the same codebase) rather than a local copy or memory of prior sessions.
+
+**Added `.github/workflows/ci.yml`.** Runs on push/PR to `main`: starts a disposable `postgis/postgis:16-3.4` service container (matching `docker-compose.yml` exactly), waits for it to report healthy, applies Alembic migrations to a completely clean database, then runs `python3 -m unittest tests.test_attendance_rules -v`, `python3 -m pytest tests/test_api_integration.py -v`, and `node --check frontend/app.js` — the same three commands documented throughout this README, now actually reproducible instead of ad hoc. No test in the suite was weakened, mocked, or made sequential to make this easier — the real concurrency test still fires two genuinely concurrent requests.
+
+**What "added and verified" means here, precisely**: the YAML was parsed and confirmed structurally valid, and every individual command the workflow runs (dependency install, `alembic upgrade head` against a fresh DB, both test commands, `node --check`) was independently executed and confirmed working in a sandbox running the same Postgres 16 + PostGIS 3.4 combination the workflow specifies. **The workflow file itself has not been executed by GitHub Actions** — no push/PR has triggered it on a real runner. Those are different claims; don't conflate "I verified the ingredients" with "I watched the recipe run in the actual kitchen."
+
+**Found and fixed a real migration bug** — and it's a good example of why "the tests passed" isn't the same claim as "this was verified against a clean environment": every prior session's real-Postgres testing ran against a database that already had the schema applied by hand (`psql -f schema.sql`), because that's what happened to be sitting there. Nobody had ever actually run `alembic upgrade head` against a genuinely empty database until this pass deliberately created one to test it. It failed immediately: `migrations/versions/0001_initial.py` executed the entire `schema.sql` file as one `op.execute()` call, and asyncpg's extended-query protocol doesn't support multiple SQL statements in a single prepared statement (`PostgresSyntaxError: cannot insert multiple commands into a prepared statement`) — a limitation `psql`'s simple-query protocol doesn't have, which is exactly why the bug stayed invisible. Fixed by splitting `schema.sql` into individual statements before executing each one (`schema.sql` itself is untouched). Re-verified against a fresh database afterward: migration applies cleanly, all 28 integration tests pass against the result.
+
+**Authorization/IDOR audit.** Read every route in `events.py`, `users.py`, and `media.py` against the actual current code — not assumed from having written it in an earlier session. Specifically checked that an event/participant/request/guest ID from one event can't be used to act on a different event's resources (every handler that takes a sub-resource ID cross-checks its `event_id` against the URL's `event_id` before touching it), and that every host-only action actually checks `event.host_user_id == caller.id` server-side. **No new vulnerabilities found** — this was a real audit with a real "nothing to fix" outcome, not a rubber stamp: `users.py`'s routes are scoped to `/me` with no ID parameter at all (the safest possible shape), and every event sub-resource route was traced by hand. Nothing was rewritten as a result, per "if everything is correct, do not rewrite it."
+
+**Cancelled-event behavior**: mostly already correct from the previous pass, verified now with 5 new real tests covering the paths that hadn't been individually exercised yet — joining the waitlist, inviting a guest, posting chat, approving a pending request, and checking in all correctly reject with the event cancelled; chat *history* remains readable throughout (cancellation doesn't erase anything); the event disappears from `/discovery/nearby` the moment it's cancelled. All verified against real Postgres, not read from the code and assumed correct.
+
+**Frontend/backend lifecycle consistency**: traced `refreshEventEverywhere()` (the central post-mutation refresh function) and confirmed it's called after edit, cancel, join, leave, waitlist changes, and request approval — each of those updates the local cache from a fresh `GET`, re-renders the open event sheet if that's what's showing, and re-renders whichever of map/feed is visible. No stale-state bug found in this pass.
+
+
 
 In priority order:
 
