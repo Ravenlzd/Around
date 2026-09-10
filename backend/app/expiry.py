@@ -63,20 +63,21 @@ async def _delete_expired_ephemeral_content(db):
     await db.commit()
 
 
-async def run_sweep():
+async def _run_cleanup(label, cleanup):
     async with async_session() as db:
         try:
-            await _expire_waitlist_offers(db)
+            await cleanup(db)
         except Exception:
-            logger.exception("waitlist offer expiry sweep failed")
-        try:
-            await _expire_guest_invitations(db)
-        except Exception:
-            logger.exception("guest invitation expiry sweep failed")
-        try:
-            await _delete_expired_ephemeral_content(db)
-        except Exception:
-            logger.exception("spontaneous post / I'm Free expiry sweep failed")
+            await db.rollback()
+            logger.exception("%s failed", label)
+
+
+async def run_sweep():
+    # Each cleanup has independent semantics. A failed transaction must be
+    # rolled back and discarded before another cleanup issues SQL.
+    await _run_cleanup("waitlist offer expiry sweep", _expire_waitlist_offers)
+    await _run_cleanup("guest invitation expiry sweep", _expire_guest_invitations)
+    await _run_cleanup("spontaneous post / I'm Free expiry sweep", _delete_expired_ephemeral_content)
 
 
 async def expiry_loop():
