@@ -105,6 +105,24 @@ async def _make_event(client, token, **overrides):
     return r.json()["id"]
 
 
+class TestAuthentication:
+    @pytest.mark.asyncio
+    async def test_signup_uses_the_migrated_default_city(self, client):
+        response = await client.post(
+            "/auth/signup",
+            json={
+                "email": f"{uuid.uuid4()}@test.around",
+                "password": "testpass123",
+                "display_name": "New Member",
+                "city": "Vilnius",
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["token_type"] == "bearer"
+        assert response.json()["access_token"]
+
+
 class TestCapacity:
     @pytest.mark.asyncio
     async def test_full_event_rejects_join(self, client, city_id):
@@ -140,6 +158,22 @@ class TestCapacity:
         statuses = sorted(r.status_code for r in results)
         # exactly one 200 and one 409 — this is the row-lock guarantee under real concurrency
         assert statuses == [200, 409]
+
+
+class TestDiscovery:
+    @pytest.mark.asyncio
+    async def test_search_returns_events_matching_the_query(self, client, city_id):
+        _, host_token = await _make_user(city_id, "Search Host")
+        event_id = await _make_event(client, host_token, title="Midnight Basketball")
+
+        response = await client.get(
+            "/discovery/search",
+            params={"q": "basketball"},
+            headers={"Authorization": f"Bearer {host_token}"},
+        )
+
+        assert response.status_code == 200, response.text
+        assert [event["id"] for event in response.json()["results"]] == [event_id]
 
 
 class TestGuests:

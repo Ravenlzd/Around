@@ -286,6 +286,9 @@ async def people_nearby(
 
     results.sort(key=lambda r: (len(r["shared_interests"]) + r["mutual_events"]), reverse=True)
     return results[:limit]
+
+
+@router.get("/search")
 async def search(
     q: str = Query(""), category: str | None = None,
     limit: int = Query(DEFAULT_PAGE_SIZE, le=MAX_PAGE_SIZE),

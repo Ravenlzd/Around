@@ -9,8 +9,8 @@ same way as event_participants below when those features are built out.
 import uuid
 from datetime import datetime
 
-from sqlalchemy import String, Boolean, ForeignKey, DateTime, Text, Integer, Numeric
-from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY
+from sqlalchemy import String, Boolean, Computed, ForeignKey, DateTime, Text, Integer, Numeric
+from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from geoalchemy2 import Geography
 
@@ -95,6 +95,10 @@ class Event(Base):
     chat_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     status: Mapped[str] = mapped_column(String, default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    search_vector = mapped_column(
+        TSVECTOR,
+        Computed("to_tsvector('simple', coalesce(title,'') || ' ' || coalesce(description,'') || ' ' || coalesce(category,''))", persisted=True),
+    )
 
     participants: Mapped[list["EventParticipant"]] = relationship(back_populates="event")
 
