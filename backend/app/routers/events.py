@@ -220,6 +220,7 @@ async def get_event(event_id: uuid.UUID, user: User = Depends(get_current_user),
     participants_out = [
         {
             "participant_id": str(p.id),
+            "user_id": str(p.user_id) if p.user_id else None,
             "name": names.get(str(p.user_id), p.guest_name or "Guest"),
             "type": p.type,
             "invited_by": names.get(str(p.invited_by_user_id)) if p.invited_by_user_id else None,
@@ -256,7 +257,9 @@ async def get_event(event_id: uuid.UUID, user: User = Depends(get_current_user),
         "access_mode": event.access_mode, "guest_policy": event.guest_policy, "invite_required": event.access_mode == "invite_only",
         "location_label": location, "location_reveal": event.location_reveal,
         "latitude": pin_lat, "longitude": pin_lng, "cover_image_url": event.cover_image_url,
-        "host_name": host.display_name if host else None, "is_host": is_host,
+        "host_name": host.display_name if host else None,
+        "host_user_id": str(event.host_user_id) if event.host_user_id else None,
+        "is_host": is_host,
         "chat_enabled": event.chat_enabled, "status": event.status,
         "participants": participants_out,
         "pending_requests": pending_requests_out,   # only populated for the host

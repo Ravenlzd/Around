@@ -57,6 +57,9 @@ let spontaneousPosts = [];
 let notifications = [];
 let imFreeStatus = null;                 // {when_window, looking_for, radius_km, ...} or null
 let imFreeNearby = [];
+let imFreeNearbyLoading = false;
+let imFreeNearbyError = false;
+let profileStats = null;
 let chatSocket = null;                   // active WS handle for the currently-open event, if any
 let demoMode = false;                    // true when no backend was reachable at boot — see enterDemoMode()
 let eventsHasMore = false;
@@ -66,7 +69,7 @@ let eventsLoadingMore = false;
 let state = {
   view:'map', activeCatFilter:null,
   mapFilter:null, discoverCat:null, activeSheet:null, currentEventId:null,
-  createStep:1, createDraft:{}, manageAdvancedOpen:false, authMode:'login',
+  createStep:1, createDraft:{}, manageAdvancedOpen:false, authMode:'login', currentScreen:'home', activityReturnScreen:'home', profileSourceEventId:null,
 };
 
 const AVATAR_COLORS = ['#C8FF3E','#FF6B4E','#6E8CFF','#FFD166','#B892FF','#5CD6C0'];
@@ -151,7 +154,7 @@ function mergeDetail(existing, detail) {
     capacity: detail.capacity, occupancy: detail.occupancy, isFull: detail.is_full,
     accessMode: detail.access_mode, guestPolicy: detail.guest_policy,
     loc: detail.location_label, locationReveal: detail.location_reveal,
-    host: detail.host_name, isHost: !!detail.is_host,
+    host: detail.host_name, hostUserId: detail.host_user_id || null, isHost: !!detail.is_host,
     isAttending: !!detail.my_status.is_attending,
     chatEnabled: detail.chat_enabled, status: detail.status || 'active',
     participants: detail.participants, pendingRequests: detail.pending_requests,
@@ -276,7 +279,7 @@ async function boot() {
 async function enterApp() {
   showScreen('app');
   await resolveLocation();
-  await Promise.all([loadNearbyEvents(), loadNotifications(), loadNearbyPosts(), loadTrustState()]);
+  await Promise.all([loadNearbyEvents(), loadNotifications(), loadNearbyPosts(), loadTrustState(), loadProfileStats()]);
   renderImfreeBar();
   setView('map');
   renderProfile();
@@ -375,6 +378,11 @@ async function loadTrustState() {
   catch (err) { console.error(err); }
 }
 
+async function loadProfileStats() {
+  try { profileStats = await UsersApi.getMyProfileStats(); }
+  catch (err) { console.error(err); }
+}
+
 /* ============================================================
    SCREENS (auth vs app)
    ============================================================ */
@@ -450,15 +458,18 @@ async function logout(){
    NAV
    ============================================================ */
 function go(screen){
+  if (screen === 'activity' && state.currentScreen !== 'activity') state.activityReturnScreen = state.currentScreen || 'home';
   document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
   document.getElementById('screen-'+screen).classList.add('active');
   document.querySelectorAll('.navbtn').forEach(b=>b.classList.remove('active'));
   const map={home:'nav-home',discover:'nav-discover',activity:'nav-activity',profile:'nav-profile'};
   if(map[screen]) document.getElementById(map[screen]).classList.add('active');
+  state.currentScreen = screen;
   if(screen==='discover') renderDiscover();
   if(screen==='activity') renderActivity();
   if(screen==='profile') renderProfile();
 }
+function backFromActivity(){ go(state.activityReturnScreen || 'home'); }
 
 function setView(v){
   state.view=v;
@@ -601,8 +612,14 @@ function previewPin(id){
   sheet.classList.add('show');
   sheet.innerHTML = `<div class="emoji-box">${CATS[ev.cat]?.e||'📍'}</div>
     <div class="info"><div class="t">${ev.title}</div><div class="m">${ev.distKm!=null?ev.distKm+'KM \u00b7 ':''}starts ${m.t} \u00b7 ${m.full?'FULL':occupancy(ev)+'/'+ev.capacity+' going'}</div></div>
-    <button class="go" onclick="AroundApp.openEvent('${ev.id}')">View</button>`;
+    <button class="go" onclick="AroundApp.openEvent('${ev.id}')">View</button>
+    <button class="close" onclick="AroundApp.closeMapPreview()" title="Close event preview">×</button>`;
   if (leafletMap) leafletMap.panTo([ev.lat, ev.lng]);
+}
+function closeMapPreview(){
+  const sheet = document.getElementById('mapSheet');
+  sheet.classList.remove('show');
+  sheet.innerHTML = '';
 }
 
 /* ============================================================
@@ -757,7 +774,11 @@ async function markNotifRead(id){
 async function renderProfile(){
   if (!session.user) return;
   const mine = [...eventsCache.values()].filter(ev=>isAttending(ev));
-  document.getElementById('statUpcoming').textContent = mine.length;
+  if (profileStats) {
+    document.getElementById('statUpcoming').textContent = profileStats.upcoming;
+    document.getElementById('statHosting').textContent = profileStats.hosting;
+    document.getElementById('statFriends').textContent = profileStats.friends;
+  }
   const el=document.getElementById('profileUpcoming');
   el.innerHTML = mine.length? mine.map(ev=>`<div class="event-card" onclick="AroundApp.openEvent('${ev.id}')">
       <div class="emoji-box">${CATS[ev.cat]?.e||'📍'}</div>
@@ -776,6 +797,37 @@ async function renderProfile(){
       avEl.textContent = initials(session.user.display_name);
     }
   }
+}
+
+function escapeHtml(value){
+  return String(value ?? '').replace(/[&<>'"]/g, char => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', "'":'&#39;', '"':'&quot;' })[char]);
+}
+async function openUserProfile(userId, sourceEventId){
+  state.profileSourceEventId = sourceEventId || null;
+  document.getElementById('userProfileContent').innerHTML = `<div class="empty-mini" style="padding:30px 0; text-align:center;">Loading…</div>`;
+  openSheet('sheetUserProfile');
+  try {
+    const profile = await UsersApi.getPublicProfile(userId);
+    const avatar = profile.avatar_url
+      ? `<img src="${MediaApi.absoluteMediaUrl(profile.avatar_url)}" alt=""/>`
+      : escapeHtml(initials(profile.display_name));
+    document.getElementById('userProfileContent').innerHTML = `
+      <div class="profile-hero">
+        <div class="profile-avatar">${avatar}</div>
+        <div class="profile-name">${escapeHtml(profile.display_name)}</div>
+        ${profile.university_or_work ? `<div class="profile-loc">${escapeHtml(profile.university_or_work)}</div>` : ''}
+        ${profile.bio ? `<div class="ed-desc">${escapeHtml(profile.bio)}</div>` : ''}
+      </div>`;
+  } catch (err) {
+    document.getElementById('userProfileContent').innerHTML = `<div class="empty-state"><div class="e">⚠️</div><div class="t">This profile isn't available.</div></div>`;
+    handleApiError(err);
+  }
+}
+function closeUserProfile(){
+  const eventId = state.profileSourceEventId;
+  state.profileSourceEventId = null;
+  if (eventId) openEvent(eventId);
+  else closeAllSheets();
 }
 
 /* ============================================================
@@ -827,7 +879,9 @@ function renderEventDetail(ev){
   const hostsAndParticipants = (ev.participants||[]).filter(p=>p.type!=='guest');
   const plistHtml = hostsAndParticipants.map(p=>{
     const guests = (ev.participants||[]).filter(g=>g.type==='guest' && g.invited_by===p.name);
-    const rowMain = `<div class="pchip"><div class="a" style="background:${avColor(p.name)}30; color:${avColor(p.name)}">${initials(p.name)}</div><span class="n">${p.name}${p.type==='host'?' \u00b7 Host':''}</span></div>`;
+    const rowMain = p.user_id
+      ? `<button class="pchip person-link" onclick="AroundApp.openUserProfile('${p.user_id}', '${ev.id}')"><div class="a" style="background:${avColor(p.name)}30; color:${avColor(p.name)}">${initials(p.name)}</div><span class="n">${p.name}${p.type==='host'?' \u00b7 Host':''}</span></button>`
+      : `<div class="pchip"><div class="a" style="background:${avColor(p.name)}30; color:${avColor(p.name)}">${initials(p.name)}</div><span class="n">${p.name}</span></div>`;
     const guestRows = guests.map(g=>`<div class="pchip guest-chip"><div class="a" style="background:${avColor(g.name)}30; color:${avColor(g.name)}">${initials(g.name)}</div><span class="n">+ ${g.name} — Guest</span></div>`).join('');
     return rowMain + guestRows;
   }).join('');
@@ -996,6 +1050,7 @@ async function refreshEventEverywhere(id){
     eventsCache.set(id, merged);
     if (state.currentEventId === id && state.activeSheet === 'sheetEvent') renderEventDetail(merged);
     if (state.view==='map') renderMap(); else if (document.getElementById('feedView').style.display!=='none') renderFeed();
+    await loadProfileStats();
     renderProfile();
   } catch (err) { console.error(err); }
 }
@@ -1138,7 +1193,7 @@ async function renderManage(id){
       <div class="manage-section">
         <div class="manage-section-title"><span>Check-in</span><span>${attendance.checked_in} in \u00b7 ${attendance.not_checked_in} not</span></div>
         <div class="checkin-summary"><div class="txt">Attendees enter this code at the door to check in</div><button onclick="AroundApp.toggleQR('${id}')">Show code</button></div>
-        <div class="qr-box" id="qrBox"><div class="qr-grid" id="qrGridInner"></div><div class="qr-caption" id="qrCaptionText">Generating\u2026</div></div>
+        <div class="qr-box" id="qrBox"><div class="qr-grid" id="qrGridInner"></div><div class="qr-caption" id="qrCaptionText">Generating\u2026</div><div class="qr-manual-code" id="qrManualCode" hidden><code id="qrTokenText"></code><button class="qr-copy-btn" onclick="AroundApp.copyCheckinToken()" title="Copy manual check-in code">Copy</button></div></div>
       </div>
       <div class="manage-section"><div class="manage-section-title"><span>Participants</span><span>${attendance.participants.length}</span></div>${partRows}</div>
       <div class="manage-section"><div class="manage-section-title"><span>Guests</span><span>${attendance.guests.length}</span></div>${guestRows}</div>
@@ -1175,6 +1230,7 @@ async function toggleQR(eventId){
     const caption = document.getElementById('qrCaptionText');
     document.getElementById('qrGridInner').innerHTML = qrCells(eventId);
     caption.textContent = 'Demo mode \u2014 not a real check-in code';
+    document.getElementById('qrManualCode').hidden = true;
     return;
   }
   await refreshCheckinQr(eventId);
@@ -1191,10 +1247,28 @@ async function refreshCheckinQr(eventId){
     caption.innerHTML = `Valid until ${expiry} \u00b7 <button class="qr-refresh-btn" onclick="event.stopPropagation(); AroundApp.refreshCheckinQr('${eventId}')">Refresh</button>`;
     const box = document.getElementById('qrBox');
     box.dataset.token = res.token;
-    box.onclick = () => { navigator.clipboard?.writeText(res.token); toast('Code copied'); };
+    document.getElementById('qrTokenText').textContent = res.token;
+    document.getElementById('qrManualCode').hidden = false;
   } catch (err) {
+    document.getElementById('qrManualCode').hidden = true;
     caption.textContent = "Couldn't generate a check-in code";
     handleApiError(err);
+  }
+}
+async function copyCheckinToken(){
+  const token = document.getElementById('qrBox')?.dataset.token;
+  if (!token) return;
+  try {
+    await navigator.clipboard.writeText(token);
+    toast('Code copied');
+  } catch (_) {
+    const code = document.getElementById('qrTokenText');
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(code);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    toast('Select and copy the code');
   }
 }
 /**
@@ -1487,6 +1561,7 @@ async function publishEvent(btn){
     try {
       const created = await EventsApi.createEvent(payload);
       eventsCache.set(created.id, adaptCard(created));
+      await loadProfileStats();
       closeAllSheets();
       toast("Published — it's live on the map 🎉");
       go('home'); setView('feed');
@@ -1527,12 +1602,17 @@ async function cancelEventNow(eventId, btn){
 let freeDraft={when:'tonight',look:'anything',dist:5};
 function openFree(){
   freeDraft={when:'tonight',look:'anything',dist:5};
+  imFreeNearby = [];
+  imFreeNearbyError = false;
   renderFree(); openSheet('sheetFree');
   loadImFreeNearby();
 }
 async function loadImFreeNearby(){
-  try { imFreeNearby = await UsersApi.nearbyImFreePeople(geo.lat, geo.lng); renderFree(); }
-  catch (err) { console.error(err); }
+  imFreeNearbyLoading = true;
+  renderFree();
+  try { imFreeNearby = await UsersApi.nearbyImFreePeople(geo.lat, geo.lng); }
+  catch (err) { imFreeNearbyError = true; handleApiError(err, "Couldn't load nearby availability"); }
+  finally { imFreeNearbyLoading = false; renderFree(); }
 }
 function renderFree(){
   const whens=['now','tonight','tomorrow','this_weekend'];
@@ -1549,11 +1629,11 @@ function renderFree(){
     </div>
     <div class="section-label" style="padding-left:0; margin-top:20px;">People free near you</div>
     <div style="display:flex; flex-direction:column; gap:8px; margin-top:6px;">
-      ${imFreeNearby.length ? imFreeNearby.map(p=>`<div class="event-card" style="cursor:default;">
+      ${imFreeNearbyLoading ? `<div class="empty-mini">Finding people who are free…</div>` : imFreeNearby.length ? imFreeNearby.map(p=>`<div class="event-card" style="cursor:default;">
           <div class="emoji-box" style="background:${avColor(p.user_id)}30; color:${avColor(p.user_id)}; font-weight:800;">?</div>
           <div class="body"><div class="title">Someone is free ${(p.when||'').replace('_',' ')}</div>
           <div class="meta">Looking for <b style="color:var(--accent)">${p.looking_for}</b> \u00b7 ${p.distance_km}km away</div></div>
-        </div>`).join('') : `<div class="empty-mini">No one nearby right now.</div>`}
+        </div>`).join('') : imFreeNearbyError ? `<div class="empty-mini">Couldn't load people who are free right now.</div>` : `<div class="empty-mini">No one eligible is free nearby right now. People appear here only after another visible member in your city turns on I'm Free.</div>`}
     </div>
     <button class="next-btn" onclick="AroundApp.activateFree(this)">Go free ${freeDraft.when.replace('_',' ')}</button>
   `;
@@ -1605,10 +1685,10 @@ async function publishPost(btn){
 window.AroundApp = {
   state, go, setView, setAuthMode, submitAuth, googleStub, logout, toast, enterDemoMode,
   endImFree: endImFreeAction, openFree, setFree, activateFree,
-  setMapFilter, previewPin, openEvent,
+  setMapFilter, previewPin, closeMapPreview, openEvent, openUserProfile, closeUserProfile,
   setDiscoverCat, filterTonight, onSearchInput, loadMoreSearchResults,
-  markNotifRead,
-  openManage, approveRequest, rejectRequest, toggleCheckIn, confirmDangerClick, toggleQR, refreshCheckinQr,
+  markNotifRead, backFromActivity,
+  openManage, approveRequest, rejectRequest, toggleCheckIn, confirmDangerClick, toggleQR, refreshCheckinQr, copyCheckinToken,
   openSheet, closeAllSheets,
   openCreate, openEditEvent, pickCat, setDraftField, setDraftTime, stepCapacity, toggleAdvanced, createNext, createBack, publishEvent,
   confirmCancelEventClick, cancelEventNow,

@@ -6,13 +6,15 @@ concern, already partly covered by app/routers/discovery.py's people
 cards, and left for a future phase rather than expanded here per the
 "no new major features" scope boundary for this integration pass).
 """
-from fastapi import APIRouter, Depends
-from sqlalchemy import select, delete
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select, delete, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models import User, UserInterest, UserStats
-from app.schemas import UserOut, ProfileUpdate
+from app.models import Block, Event, EventParticipant, Friendship, User, UserInterest, UserStats
+from app.schemas import PublicUserOut, UserOut, ProfileUpdate
 from app.deps import get_current_user
 from app.trust import derive_trust_state
 
@@ -56,3 +58,58 @@ async def get_my_trust_state(user: User = Depends(get_current_user), db: AsyncSe
 async def get_my_interests(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     rows = (await db.scalars(select(UserInterest.interest).where(UserInterest.user_id == user.id))).all()
     return {"interests": rows}
+
+
+@router.get("/me/stats")
+async def get_my_profile_stats(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """Counts shown on the signed-in member's profile, derived from live rows."""
+    now = datetime.now(timezone.utc)
+    upcoming = await db.scalar(
+        select(func.count()).select_from(EventParticipant).join(Event).where(
+            EventParticipant.user_id == user.id,
+            EventParticipant.status == "going",
+            Event.status == "active",
+            Event.starts_at >= now,
+        )
+    ) or 0
+    hosting = await db.scalar(
+        select(func.count()).select_from(Event).where(
+            Event.host_user_id == user.id,
+            Event.status == "active",
+            Event.starts_at >= now,
+        )
+    ) or 0
+    friends = await db.scalar(
+        select(func.count()).select_from(Friendship).where(
+            or_(Friendship.user_id_a == user.id, Friendship.user_id_b == user.id),
+            Friendship.status == "accepted",
+        )
+    ) or 0
+    return {"upcoming": upcoming, "hosting": hosting, "friends": friends}
+
+
+@router.get("/{user_id}", response_model=PublicUserOut)
+async def get_public_profile(
+    user_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    """Read a limited member profile without exposing private account or location data."""
+    try:
+        import uuid
+        profile_id = uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+
+    profile = await db.get(User, profile_id)
+    if not profile or profile.status != "active":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    blocked = await db.scalar(
+        select(Block).where(
+            or_(
+                (Block.blocker_id == user.id) & (Block.blocked_id == profile_id),
+                (Block.blocker_id == profile_id) & (Block.blocked_id == user.id),
+            )
+        )
+    )
+    if blocked:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    return profile

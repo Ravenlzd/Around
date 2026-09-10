@@ -8,11 +8,11 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends
 from geoalchemy2.functions import ST_MakePoint, ST_SetSRID, ST_DistanceSphere
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models import ImFreeStatus, User
+from app.models import Block, ImFreeStatus, User
 from app.schemas import ImFreeCreate
 from app.deps import get_current_user
 
@@ -53,11 +53,30 @@ async def end_status(user: User = Depends(get_current_user), db: AsyncSession = 
 async def nearby_free_people(
     lat: float, lng: float, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ):
+    if user.hide_from_nearby:
+        return []
+
+    blocked_rows = (await db.scalars(
+        select(Block).where(or_(Block.blocker_id == user.id, Block.blocked_id == user.id))
+    )).all()
+    excluded_ids = {user.id}
+    for block in blocked_rows:
+        excluded_ids.add(block.blocker_id)
+        excluded_ids.add(block.blocked_id)
+
     user_point = ST_SetSRID(ST_MakePoint(lng, lat), 4326)
     distance_expr = (ST_DistanceSphere(ImFreeStatus.location, user_point) / 1000).label("distance_km")
     stmt = (
         select(ImFreeStatus, distance_expr)
-        .where(ImFreeStatus.expires_at > datetime.now(timezone.utc), ImFreeStatus.user_id != user.id)
+        .join(User, User.id == ImFreeStatus.user_id)
+        .where(
+            ImFreeStatus.expires_at > datetime.now(timezone.utc),
+            ImFreeStatus.user_id.notin_(excluded_ids),
+            ImFreeStatus.location.is_not(None),
+            User.city_id == user.city_id,
+            User.hide_from_nearby.is_(False),
+            or_(ImFreeStatus.radius_km.is_(None), distance_expr <= ImFreeStatus.radius_km),
+        )
         .order_by(distance_expr.asc())
         .limit(30)
     )

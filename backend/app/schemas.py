@@ -38,6 +38,18 @@ class UserOut(BaseModel):
         from_attributes = True
 
 
+class PublicUserOut(BaseModel):
+    """The non-sensitive portion of a member profile visible to signed-in users."""
+    id: UUID
+    display_name: str
+    university_or_work: str | None = None
+    bio: str | None = None
+    avatar_url: str | None = None
+
+    class Config:
+        from_attributes = True
+
+
 class ProfileUpdate(BaseModel):
     display_name: str | None = None
     university_or_work: str | None = None

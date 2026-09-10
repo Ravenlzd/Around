@@ -31,7 +31,7 @@ from httpx import AsyncClient, ASGITransport
 
 from app.main import app
 from app.database import async_session
-from app.models import City, User
+from app.models import Block, City, Friendship, User
 from app.routers.auth import pwd_context, create_access_token
 
 
@@ -121,6 +121,98 @@ class TestAuthentication:
         assert response.status_code == 200, response.text
         assert response.json()["token_type"] == "bearer"
         assert response.json()["access_token"]
+
+
+class TestProfiles:
+    @pytest.mark.asyncio
+    async def test_event_detail_exposes_member_ids_and_limited_profiles(self, client, city_id):
+        host_id, host_token = await _make_user(city_id, "Profile Host")
+        event_id = await _make_event(client, host_token, capacity=5)
+        attendee_id, attendee_token = await _make_user(city_id, "Profile Attendee")
+        await client.post(f"/events/{event_id}/join", headers={"Authorization": f"Bearer {attendee_token}"})
+
+        detail = await client.get(f"/events/{event_id}", headers={"Authorization": f"Bearer {attendee_token}"})
+        assert detail.status_code == 200, detail.text
+        assert detail.json()["host_user_id"] == str(host_id)
+        assert {p["user_id"] for p in detail.json()["participants"]} == {str(host_id), str(attendee_id)}
+
+        profile = await client.get(f"/users/{host_id}", headers={"Authorization": f"Bearer {attendee_token}"})
+        assert profile.status_code == 200, profile.text
+        assert profile.json()["display_name"] == "Profile Host"
+        assert "email" not in profile.json()
+        assert "location_precision" not in profile.json()
+
+    @pytest.mark.asyncio
+    async def test_blocked_profiles_are_not_readable(self, client, city_id):
+        viewer_id, viewer_token = await _make_user(city_id, "Blocked Viewer")
+        target_id, _ = await _make_user(city_id, "Blocked Target")
+        async with async_session() as db:
+            db.add(Block(blocker_id=viewer_id, blocked_id=target_id))
+            await db.commit()
+
+        response = await client.get(f"/users/{target_id}", headers={"Authorization": f"Bearer {viewer_token}"})
+        assert response.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_profile_stats_are_scoped_to_the_authenticated_user(self, client, city_id):
+        user_id, user_token = await _make_user(city_id, "Stats User")
+        await _make_event(client, user_token, capacity=5)
+        friend_id, _ = await _make_user(city_id, "Stats Friend")
+        a, b = sorted((user_id, friend_id), key=str)
+        async with async_session() as db:
+            db.add(Friendship(user_id_a=a, user_id_b=b, status="accepted", requested_by=user_id))
+            await db.commit()
+
+        response = await client.get("/users/me/stats", headers={"Authorization": f"Bearer {user_token}"})
+        assert response.status_code == 200, response.text
+        assert response.json() == {"upcoming": 1, "hosting": 1, "friends": 1}
+
+
+class TestImFree:
+    @pytest.mark.asyncio
+    async def test_nearby_returns_another_eligible_active_status(self, client, city_id):
+        _, viewer_token = await _make_user(city_id, "Free Viewer")
+        active_id, active_token = await _make_user(city_id, "Free Member")
+        activation = await client.post(
+            "/im-free",
+            json={"when_window": "now", "looking_for": "coffee", "radius_km": 5, "latitude": 54.69, "longitude": 25.28},
+            headers={"Authorization": f"Bearer {active_token}"},
+        )
+        assert activation.status_code == 200, activation.text
+
+        response = await client.get(
+            "/im-free/nearby", params={"lat": 54.69, "lng": 25.28}, headers={"Authorization": f"Bearer {viewer_token}"}
+        )
+        assert response.status_code == 200, response.text
+        match = next((row for row in response.json() if row["user_id"] == str(active_id)), None)
+        assert match == {"user_id": str(active_id), "when": "now", "looking_for": "coffee", "distance_km": 0.0}
+
+    @pytest.mark.asyncio
+    async def test_nearby_excludes_hidden_and_blocked_members(self, client, city_id):
+        viewer_id, viewer_token = await _make_user(city_id, "Visibility Viewer")
+        hidden_id, hidden_token = await _make_user(city_id, "Hidden Member")
+        blocked_id, blocked_token = await _make_user(city_id, "Blocked Member")
+        async with async_session() as db:
+            hidden = await db.get(User, hidden_id)
+            hidden.hide_from_nearby = True
+            db.add(Block(blocker_id=viewer_id, blocked_id=blocked_id))
+            await db.commit()
+
+        for token in (hidden_token, blocked_token):
+            response = await client.post(
+                "/im-free",
+                json={"when_window": "now", "looking_for": "coffee", "radius_km": 5, "latitude": 54.69, "longitude": 25.28},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert response.status_code == 200, response.text
+
+        response = await client.get(
+            "/im-free/nearby", params={"lat": 54.69, "lng": 25.28}, headers={"Authorization": f"Bearer {viewer_token}"}
+        )
+        assert response.status_code == 200, response.text
+        returned_ids = {row["user_id"] for row in response.json()}
+        assert str(hidden_id) not in returned_ids
+        assert str(blocked_id) not in returned_ids
 
 
 class TestCapacity:

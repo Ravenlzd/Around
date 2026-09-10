@@ -15,6 +15,14 @@ export async function getMyTrustState() {
   return apiClient.get("/users/me/trust");
 }
 
+export async function getMyProfileStats() {
+  return apiClient.get("/users/me/stats");
+}
+
+export async function getPublicProfile(userId) {
+  return apiClient.get(`/users/${encodeURIComponent(userId)}`);
+}
+
 // ---------- I'm Free ----------
 // Preserves the expiry model from the backend README: statuses always
 // carry expires_at server-side and reads filter on it, so a stale status
