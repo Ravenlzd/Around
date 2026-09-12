@@ -1,12 +1,13 @@
 """
-Integration tests for this pass's new features: email verification,
-signup/login error handling, nickname/bio moderation, the curated
-interests catalog, friend-request notifications, and friend-to-friend
-chat. Same real-Postgres requirement as test_api_integration.py — see
-that file's module docstring for how to run these (needs a live
-Postgres/PostGIS, not available in this sandbox — see the session's
-own report for confirmation these were compiled and reasoned through
-but not executed here).
+Integration tests for: OTP-based signup email verification (see
+app/models.py's PendingSignup), login error handling, nickname/bio
+moderation, the curated interests catalog, friend-request
+notifications, and friend-to-friend chat. Same real-Postgres
+requirement as test_api_integration.py — see that file's module
+docstring for how to run these (needs a live Postgres/PostGIS, not
+available in this sandbox — see the session's own report for
+confirmation these were compiled and reasoned through but not executed
+here).
 
 Fixtures (client/city_id/event_loop/_make_user) are duplicated from
 test_api_integration.py rather than imported from it: there's no
@@ -19,6 +20,8 @@ risk than a new, environment-sensitive way for the suite to break.
 """
 import asyncio
 import uuid
+from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 import pytest
 import pytest_asyncio
@@ -26,7 +29,7 @@ from httpx import AsyncClient, ASGITransport
 
 from app.main import app
 from app.database import async_session
-from app.models import City, EmailVerificationToken, User
+from app.models import City, PendingSignup, User
 from app.routers.auth import pwd_context, create_access_token
 
 
@@ -60,7 +63,7 @@ async def city_id():
 
 
 async def _make_user(city_id, name="Test User") -> tuple[uuid.UUID, str]:
-    """Returns (user_id, bearer_token) for a fresh throwaway user — bypasses signup/moderation, matching test_api_integration.py's helper."""
+    """Returns (user_id, bearer_token) for a fresh throwaway user — bypasses signup/OTP, matching test_api_integration.py's helper."""
     async with async_session() as db:
         user = User(
             email=f"{uuid.uuid4()}@test.around",
@@ -75,31 +78,31 @@ async def _make_user(city_id, name="Test User") -> tuple[uuid.UUID, str]:
         return user.id, create_access_token(str(user.id))
 
 
+async def _make_verified_user_with_email(city_id, email, name="Test User"):
+    async with async_session() as db:
+        user = User(email=email, password_hash=pwd_context.hash("testpass123"), display_name=name, city_id=city_id, email_verified=True)
+        db.add(user)
+        await db.commit()
+
+
+async def _signup_and_capture_otp(client, email, password="testpass123", name="OTP User", city="Vilnius"):
+    """
+    Calls the REAL /auth/signup endpoint end-to-end; only the outbound
+    email itself is mocked (send_signup_otp_email), so what's captured
+    here is exactly the code the real endpoint generated and would have
+    emailed — not a bypass of the endpoint's own logic.
+    """
+    captured = {}
+    with patch("app.routers.auth.send_signup_otp_email", side_effect=lambda to, code: captured.update(to=to, code=code)):
+        r = await client.post("/auth/signup", json={"email": email, "password": password, "display_name": name, "city": city})
+    return r, captured.get("code")
+
+
 class TestAuthSecurity:
-    @pytest.mark.asyncio
-    async def test_signup_duplicate_email_returns_409_with_clear_message(self, client, city_id):
-        email = f"{uuid.uuid4()}@test.around"
-        payload = {"email": email, "password": "testpass123", "display_name": "Dup User", "city": "Vilnius"}
-        first = await client.post("/auth/signup", json=payload)
-        assert first.status_code == 200, first.text
-        second = await client.post("/auth/signup", json=payload)
-        assert second.status_code == 409
-        assert "already exists" in second.json()["detail"]
-
-    @pytest.mark.asyncio
-    async def test_signup_email_normalized_case_insensitively_for_duplicates(self, client, city_id):
-        base = f"{uuid.uuid4()}@Test.Around"
-        payload = {"email": base, "password": "testpass123", "display_name": "Case User", "city": "Vilnius"}
-        first = await client.post("/auth/signup", json=payload)
-        assert first.status_code == 200, first.text
-        dup = dict(payload, email=base.upper())
-        second = await client.post("/auth/signup", json=dup)
-        assert second.status_code == 409
-
     @pytest.mark.asyncio
     async def test_login_wrong_password_returns_generic_message(self, client, city_id):
         email = f"{uuid.uuid4()}@test.around"
-        await client.post("/auth/signup", json={"email": email, "password": "correctpass1", "display_name": "Wrong Pw", "city": "Vilnius"})
+        await _make_verified_user_with_email(city_id, email, "Wrong Pw")
         r = await client.post("/auth/login", json={"email": email, "password": "wrongpassword"})
         assert r.status_code == 401
         assert r.json()["detail"] == "Wrong email or password."
@@ -113,53 +116,181 @@ class TestAuthSecurity:
     @pytest.mark.asyncio
     async def test_login_email_is_case_insensitive(self, client, city_id):
         email = f"{uuid.uuid4()}@Test.Around"
-        await client.post("/auth/signup", json={"email": email, "password": "testpass123", "display_name": "Case Login", "city": "Vilnius"})
+        await _make_verified_user_with_email(city_id, email.lower(), "Case Login")
         r = await client.post("/auth/login", json={"email": email.upper(), "password": "testpass123"})
         assert r.status_code == 200, r.text
 
 
-class TestEmailVerification:
+class TestSignupOtp:
+    """
+    Signup now goes through app/models.py's PendingSignup (Option A —
+    "verify before creating the account") rather than the previous
+    link-based EmailVerificationToken flow: no User row exists at all
+    until the OTP is verified, so there is no window where an
+    unverified, login-capable account exists.
+    """
+
     @pytest.mark.asyncio
-    async def test_signup_creates_an_unverified_user_and_a_token(self, client, city_id):
+    async def test_signup_creates_a_pending_signup_not_a_user(self, client, city_id):
         email = f"{uuid.uuid4()}@test.around"
-        r = await client.post("/auth/signup", json={"email": email, "password": "testpass123", "display_name": "Verify Me", "city": "Vilnius"})
+        r, code = await _signup_and_capture_otp(client, email)
         assert r.status_code == 200, r.text
+        assert r.json() == {"status": "otp_sent", "email": email}
+        assert code is not None and len(code) == 6 and code.isdigit()
+
+        async with async_session() as db:
+            from sqlalchemy import select
+            assert await db.scalar(select(User).where(User.email == email)) is None
+            pending = await db.scalar(select(PendingSignup).where(PendingSignup.email == email))
+            assert pending is not None
+            assert pending.otp_hash != code  # raw code is never persisted
+            assert pending.attempt_count == 0
+
+    @pytest.mark.asyncio
+    async def test_account_is_not_usable_before_verification(self, client, city_id):
+        email = f"{uuid.uuid4()}@test.around"
+        await _signup_and_capture_otp(client, email, password="correctpass1")
+        login = await client.post("/auth/login", json={"email": email, "password": "correctpass1"})
+        assert login.status_code == 401  # no User row exists yet — not "unverified", genuinely absent
+
+    @pytest.mark.asyncio
+    async def test_correct_otp_completes_signup_and_the_account_can_then_log_in(self, client, city_id):
+        email = f"{uuid.uuid4()}@test.around"
+        _, code = await _signup_and_capture_otp(client, email)
+        r = await client.post("/auth/verify-signup-otp", json={"email": email, "otp": code})
+        assert r.status_code == 200, r.text
+        assert r.json()["token_type"] == "bearer" and r.json()["access_token"]
+
         async with async_session() as db:
             from sqlalchemy import select
             user = await db.scalar(select(User).where(User.email == email))
-            assert user is not None and user.email_verified is False
-            token_row = await db.scalar(select(EmailVerificationToken).where(EmailVerificationToken.user_id == user.id))
-            assert token_row is not None and token_row.used_at is None
+            assert user is not None and user.email_verified is True
+            assert await db.scalar(select(PendingSignup).where(PendingSignup.email == email)) is None
+
+        login = await client.post("/auth/login", json={"email": email, "password": "testpass123"})
+        assert login.status_code == 200, login.text
 
     @pytest.mark.asyncio
-    async def test_verify_email_rejects_an_invalid_token(self, client):
-        r = await client.post("/auth/verify-email", json={"token": "not-a-real-token"})
+    async def test_wrong_otp_is_rejected_and_counts_as_an_attempt(self, client, city_id):
+        email = f"{uuid.uuid4()}@test.around"
+        _, code = await _signup_and_capture_otp(client, email)
+        wrong = "000000" if code != "000000" else "111111"
+        r = await client.post("/auth/verify-signup-otp", json={"email": email, "otp": wrong})
         assert r.status_code == 400
-
-    @pytest.mark.asyncio
-    async def test_resend_verification_requires_auth(self, client):
-        r = await client.post("/auth/resend-verification")
-        assert r.status_code == 401
-
-    @pytest.mark.asyncio
-    async def test_full_verification_round_trip_is_single_use(self, client, city_id):
-        from app.routers.auth import _issue_verification_token
-        user_id, _token = await _make_user(city_id, "RoundTrip")
+        assert r.json()["detail"] == "Incorrect verification code."
         async with async_session() as db:
-            user = await db.get(User, user_id)
-            raw_token = await _issue_verification_token(db, user)
+            from sqlalchemy import select
+            pending = await db.scalar(select(PendingSignup).where(PendingSignup.email == email))
+            assert pending.attempt_count == 1
+
+    @pytest.mark.asyncio
+    async def test_otp_is_single_use(self, client, city_id):
+        email = f"{uuid.uuid4()}@test.around"
+        _, code = await _signup_and_capture_otp(client, email)
+        first = await client.post("/auth/verify-signup-otp", json={"email": email, "otp": code})
+        assert first.status_code == 200, first.text
+        second = await client.post("/auth/verify-signup-otp", json={"email": email, "otp": code})
+        assert second.status_code == 400  # the PendingSignup row is gone — the account already exists
+
+    @pytest.mark.asyncio
+    async def test_expired_otp_is_rejected(self, client, city_id):
+        email = f"{uuid.uuid4()}@test.around"
+        _, code = await _signup_and_capture_otp(client, email)
+        async with async_session() as db:
+            from sqlalchemy import select
+            pending = await db.scalar(select(PendingSignup).where(PendingSignup.email == email))
+            pending.otp_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+            await db.commit()
+        r = await client.post("/auth/verify-signup-otp", json={"email": email, "otp": code})
+        assert r.status_code == 400
+        assert "expired" in r.json()["detail"].lower()
+
+    @pytest.mark.asyncio
+    async def test_too_many_attempts_blocks_even_the_correct_code(self, client, city_id):
+        email = f"{uuid.uuid4()}@test.around"
+        _, code = await _signup_and_capture_otp(client, email)
+        wrong = "000000" if code != "000000" else "111111"
+        last = None
+        for _ in range(5):
+            last = await client.post("/auth/verify-signup-otp", json={"email": email, "otp": wrong})
+        assert last.status_code == 429
+        assert "Too many attempts" in last.json()["detail"]
+        r = await client.post("/auth/verify-signup-otp", json={"email": email, "otp": code})
+        assert r.status_code == 429
+
+    @pytest.mark.asyncio
+    async def test_resend_issues_a_new_code_and_invalidates_the_old_one(self, client, city_id):
+        email = f"{uuid.uuid4()}@test.around"
+        _, first_code = await _signup_and_capture_otp(client, email)
+
+        async with async_session() as db:
+            from sqlalchemy import select
+            pending = await db.scalar(select(PendingSignup).where(PendingSignup.email == email))
+            pending.last_sent_at = datetime.now(timezone.utc) - timedelta(seconds=60)  # clear the resend cooldown for this test
             await db.commit()
 
-        first = await client.post("/auth/verify-email", json={"token": raw_token})
-        assert first.status_code == 200, first.text
-        assert first.json()["status"] == "verified"
+        captured = {}
+        with patch("app.routers.auth.send_signup_otp_email", side_effect=lambda to, code: captured.update(code=code)):
+            r = await client.post("/auth/resend-signup-otp", json={"email": email})
+        assert r.status_code == 200, r.text
+        new_code = captured["code"]
 
-        second = await client.post("/auth/verify-email", json={"token": raw_token})
-        assert second.status_code == 400  # already used
+        stale = await client.post("/auth/verify-signup-otp", json={"email": email, "otp": first_code})
+        assert stale.status_code == 400  # old code no longer matches the (now different) stored hash
+
+        fresh = await client.post("/auth/verify-signup-otp", json={"email": email, "otp": new_code})
+        assert fresh.status_code == 200, fresh.text
+
+    @pytest.mark.asyncio
+    async def test_resend_is_rate_limited_by_cooldown(self, client, city_id):
+        email = f"{uuid.uuid4()}@test.around"
+        await _signup_and_capture_otp(client, email)
+        r = await client.post("/auth/resend-signup-otp", json={"email": email})
+        assert r.status_code == 429  # immediate resend, inside RESEND_COOLDOWN
+        assert "wait" in r.json()["detail"].lower()
+
+    @pytest.mark.asyncio
+    async def test_signup_duplicate_of_a_verified_account_is_rejected(self, client, city_id):
+        email = f"{uuid.uuid4()}@test.around"
+        await _make_verified_user_with_email(city_id, email)
+        r, _ = await _signup_and_capture_otp(client, email)
+        assert r.status_code == 409
+        assert "already exists" in r.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_email_is_normalized_for_duplicate_detection(self, client, city_id):
+        base = f"{uuid.uuid4()}@Test.Around"
+        await _make_verified_user_with_email(city_id, base.lower())
+        r, _ = await _signup_and_capture_otp(client, base.upper())
+        assert r.status_code == 409
+
+    @pytest.mark.asyncio
+    async def test_resignup_with_a_still_pending_email_replaces_it_rather_than_erroring(self, client, city_id):
+        email = f"{uuid.uuid4()}@test.around"
+        r1, code1 = await _signup_and_capture_otp(client, email, name="First Try")
+        assert r1.status_code == 200, r1.text
+        r2, code2 = await _signup_and_capture_otp(client, email, name="Second Try")
+        assert r2.status_code == 200, r2.text  # not a 409 — a pending (unverified) signup isn't a real account yet
+
+        stale = await client.post("/auth/verify-signup-otp", json={"email": email, "otp": code1})
+        assert stale.status_code == 400
+
+        fresh = await client.post("/auth/verify-signup-otp", json={"email": email, "otp": code2})
+        assert fresh.status_code == 200, fresh.text
 
         async with async_session() as db:
-            refreshed = await db.get(User, user_id)
-            assert refreshed.email_verified is True
+            from sqlalchemy import select
+            user = await db.scalar(select(User).where(User.email == email))
+            assert user.display_name == "Second Try"
+
+    @pytest.mark.asyncio
+    async def test_moderated_nickname_is_rejected_before_any_pending_signup_is_created(self, client, city_id):
+        email = f"{uuid.uuid4()}@test.around"
+        r, _ = await _signup_and_capture_otp(client, email, name="fuck")
+        assert r.status_code == 400
+        async with async_session() as db:
+            from sqlalchemy import select
+            assert await db.scalar(select(PendingSignup).where(PendingSignup.email == email)) is None
 
 
 class TestModeration:

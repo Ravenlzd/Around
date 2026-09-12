@@ -9,12 +9,15 @@ plain SMTP via the standard library, which every one of those providers
 also exposes as an SMTP relay — the choice of provider becomes a Render
 environment-variable decision, not a code change.
 
-If SMTP_HOST isn't configured (the default), send_email() logs the
-message instead of attempting to send it. This is deliberate: it lets
-the rest of the verification flow (token creation, the verify/resend
-endpoints, the frontend UI) be fully built and testable right now,
-without a working mail provider, while making it obvious in the logs
-that no real email went out.
+If SMTP_HOST isn't configured (the default), send_email() logs instead
+of attempting to send. In development/testing this logs the full body
+(useful for exercising the OTP flow without a mail provider); in
+production it deliberately does NOT — this module's callers now
+include the 6-digit signup OTP, and "log the code in production
+because there's no mail provider" is exactly the silent, insecure
+fallback this was told not to do. In production with no provider
+configured, signup genuinely cannot complete (no verification code
+ever reaches the user, anywhere) until SMTP_* is set on Render.
 """
 import logging
 import smtplib
@@ -37,7 +40,14 @@ def send_email(to: str, subject: str, body: str) -> bool:
     False when running in the unconfigured/log-only mode.
     """
     if not is_configured():
-        logger.info("[EMAIL - not sent, SMTP not configured] to=%s subject=%s\n%s", to, subject, body)
+        if settings.ENV == "production":
+            logger.warning(
+                "Email NOT sent (no SMTP provider configured) to=%s subject=%s — "
+                "set SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASSWORD/SMTP_FROM_EMAIL on Render to enable real delivery.",
+                to, subject,
+            )
+        else:
+            logger.info("[EMAIL - not sent, SMTP not configured] to=%s subject=%s\n%s", to, subject, body)
         return False
 
     msg = EmailMessage()
@@ -59,15 +69,20 @@ def send_email(to: str, subject: str, body: str) -> bool:
         return True  # attempted — caller shouldn't treat this as "not configured"
 
 
-def send_verification_email(to: str, display_name: str, token: str) -> None:
-    link = f"{settings.PUBLIC_APP_URL.rstrip('/')}/?verify_email={token}"
+def send_signup_otp_email(to: str, code: str) -> None:
+    """
+    The code is deliberately only ever in the email BODY, never a URL
+    (a link carries the risk of being pre-fetched/scanned by mail
+    security scanners, proxies, or link-preview bots, which would burn
+    a single-use code before the real user ever sees it) — this is why
+    signup moved from a clickable link to a typed 6-digit code at all.
+    """
     send_email(
         to=to,
-        subject="Verify your Around account",
+        subject="Your Around verification code",
         body=(
-            f"Hi {display_name},\n\n"
-            f"Confirm your email to finish setting up Around:\n{link}\n\n"
-            "This link expires in 24 hours and can only be used once. "
-            "If you didn't create an Around account, you can ignore this email.\n"
+            "Use this code to verify your email address:\n\n"
+            f"{code}\n\n"
+            "This code expires in 10 minutes. If you didn't try to sign up for Around, you can ignore this email.\n"
         ),
     )

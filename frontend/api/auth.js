@@ -8,13 +8,28 @@ import { apiClient } from "./client.js";
  */
 
 /**
+ * Starts signup — does NOT create an account or return a token. The
+ * account only exists once verifySignupOtp() below succeeds; this just
+ * gets a 6-digit code emailed. @returns {Promise<{status: string, email: string}>}
  * @param {{email: string, password: string, display_name: string, city?: string}} payload
- * @returns {Promise<TokenResponse>}
  */
 export async function register(payload) {
-  const res = await apiClient.post("/auth/signup", { city: "Vilnius", ...payload }, { auth: false });
+  return apiClient.post("/auth/signup", { city: "Vilnius", ...payload }, { auth: false });
+}
+
+/**
+ * Completes signup: creates the account and logs in, in one step.
+ * @param {string} email @param {string} otp @returns {Promise<TokenResponse>}
+ */
+export async function verifySignupOtp(email, otp) {
+  const res = await apiClient.post("/auth/verify-signup-otp", { email, otp }, { auth: false });
   await apiClient.tokens.set(res.access_token);
   return res;
+}
+
+/** @param {string} email */
+export async function resendSignupOtp(email) {
+  return apiClient.post("/auth/resend-signup-otp", { email }, { auth: false });
 }
 
 /**
@@ -46,13 +61,4 @@ export async function logout() {
 export async function hasStoredSession() {
   const token = await apiClient.tokens.get();
   return !!token;
-}
-
-/** @param {string} token — the raw token from the emailed link's ?verify_email= query param */
-export async function verifyEmail(token) {
-  return apiClient.post("/auth/verify-email", { token }, { auth: false });
-}
-
-export async function resendVerification() {
-  return apiClient.post("/auth/resend-verification", {});
 }

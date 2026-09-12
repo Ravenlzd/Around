@@ -306,22 +306,24 @@ CREATE TABLE direct_messages (
 );
 CREATE INDEX idx_dm_thread ON direct_messages(least(sender_id::text, recipient_id::text), greatest(sender_id::text, recipient_id::text), created_at);
 
--- ---------- Email verification ----------
--- Added by migrations/0003 in an already-deployed database (with
--- existing users backfilled to email_verified=true — see that
--- migration's docstring); included here too so a brand new local
--- database matches. Nothing reads/writes this table until a mail
--- provider is configured and app/config.py's REQUIRE_EMAIL_VERIFICATION
--- is turned on.
-CREATE TABLE email_verification_tokens (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id     UUID REFERENCES users(id) NOT NULL,
-    token_hash  TEXT NOT NULL UNIQUE,
-    expires_at  TIMESTAMPTZ NOT NULL,
-    used_at     TIMESTAMPTZ,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+-- ---------- Signup email verification (OTP) ----------
+-- Replaces an earlier link-based email_verification_tokens table
+-- (migrations/0004 drops it in an already-deployed database) — see
+-- app/models.py's PendingSignup for the full rationale. No `users` row
+-- is created until the OTP here is verified, so users.email_verified
+-- is always true by construction for every account created this way.
+CREATE TABLE pending_signups (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email           TEXT NOT NULL UNIQUE,
+    password_hash   TEXT NOT NULL,
+    display_name    TEXT NOT NULL,
+    city_id         UUID REFERENCES cities(id) NOT NULL,
+    otp_hash        TEXT NOT NULL,
+    otp_expires_at  TIMESTAMPTZ NOT NULL,
+    attempt_count   INTEGER NOT NULL DEFAULT 0,
+    last_sent_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX idx_email_verification_user ON email_verification_tokens(user_id);
 
 -- ---------- Reports / moderation ----------
 CREATE TABLE reports (

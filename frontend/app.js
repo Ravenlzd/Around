@@ -71,7 +71,7 @@ let eventsLoadingMore = false;
 let state = {
   view:'map', activeCatFilter:null,
   mapFilter:null, discoverCat:null, activeSheet:null, currentEventId:null,
-  createStep:1, createDraft:{}, manageAdvancedOpen:false, authMode:'login', currentScreen:'home', activityReturnScreen:'home', profileSourceEventId:null,
+  createStep:1, createDraft:{}, manageAdvancedOpen:false, authMode:'login', pendingOtpEmail:null, currentScreen:'home', activityReturnScreen:'home', profileSourceEventId:null,
 };
 
 const AVATAR_COLORS = ['#C8FF3E','#FF6B4E','#6E8CFF','#FFD166','#B892FF','#5CD6C0'];
@@ -259,26 +259,6 @@ const DEMO_NOTIFICATIONS = [
 /* ============================================================
    BOOTSTRAP
    ============================================================ */
-async function checkEmailVerificationLink(){
-  const params = new URLSearchParams(window.location.search);
-  const token = params.get('verify_email');
-  if (!token) return;
-  // Strip the token from the URL immediately regardless of outcome —
-  // it's single-use server-side anyway, and leaving it in the address
-  // bar (or history) after this page load is unnecessary exposure of a
-  // sensitive value for zero benefit.
-  params.delete('verify_email');
-  const qs = params.toString();
-  history.replaceState(null, '', window.location.pathname + (qs ? `?${qs}` : ''));
-  try {
-    await AuthApi.verifyEmail(token);
-    toast('Email verified ✅');
-    if (session.user) { session.user.email_verified = true; renderProfile(); }
-  } catch (err) {
-    toast((err instanceof ApiError && err.message) || "That verification link didn't work");
-  }
-}
-
 /* ============================================================
    PWA — installability only, not offline support (see frontend/sw.js).
 
@@ -348,7 +328,6 @@ function dismissInstallBanner(){
 async function boot() {
   registerServiceWorker();
   wireAuthScreen();
-  await checkEmailVerificationLink();
   backendReachable = await isBackendReachable();
   if (!backendReachable) {
     renderAuthScreen(); // re-render with the "backend unreachable" notice now that we know
@@ -491,6 +470,12 @@ function wireAuthScreen(){ renderAuthScreen(); }
 
 let backendReachable = null; // null = not checked yet, true/false after boot()'s health check
 
+function maskEmail(email){
+  const at = email.indexOf('@');
+  if (at <= 0) return email;
+  return `${email[0]}***${email.slice(at)}`;
+}
+
 function renderAuthScreen(){
   const el = document.getElementById('authContent');
   const mode = state.authMode;
@@ -500,6 +485,30 @@ function renderAuthScreen(){
       <div class="s">Sign-in needs a live Around server. You can still look around with sample data.</div>
       <button class="next-btn" style="margin-top:10px;" onclick="AroundApp.enterDemoMode()">Preview with sample data</button>
     </div>` : '';
+
+  if (mode === 'otp') {
+    el.innerHTML = `
+      <div class="auth-brand"><span class="dot"></span>Around</div>
+      <div style="margin-top:22px; text-align:center;">
+        <div class="profile-name" style="font-size:19px;">Verify your email</div>
+        <div class="auth-tag">We sent a 6-digit code to ${escapeHtml(maskEmail(state.pendingOtpEmail || ''))}</div>
+      </div>
+      <input class="text-input otp-input" id="otpInput" placeholder="______" inputmode="numeric" pattern="[0-9]*" autocomplete="one-time-code" maxlength="6" style="margin-top:20px;" onkeydown="if(event.key==='Enter')AroundApp.submitOtpVerification()"/>
+      <button class="next-btn" id="otpSubmitBtn" onclick="AroundApp.submitOtpVerification()">Verify email</button>
+      <button class="back-link" id="otpResendBtn" style="width:100%; margin-top:14px; padding:10px; cursor:pointer;" onclick="AroundApp.resendOtp(this)">Resend code</button>
+      <div class="back-link" style="cursor:pointer;" onclick="AroundApp.cancelOtpVerification()">← Use a different email</div>
+    `;
+    // Right after landing here (fresh signup or a page reload with a
+    // still-pending email), the backend's own RESEND_COOLDOWN already
+    // started ticking from whenever the code was last sent — reflect
+    // that immediately instead of letting the button look falsely
+    // available for 45s.
+    startOtpResendCooldown(45);
+    const input = document.getElementById('otpInput');
+    if (input) input.focus();
+    return;
+  }
+
   el.innerHTML = `
     <div class="auth-brand"><span class="dot"></span>Around</div>
     <div class="auth-tag">The live social layer of your city.</div>
@@ -529,10 +538,17 @@ async function submitAuth(){
       if (state.authMode === 'register') {
         const name = document.getElementById('authName').value.trim();
         if (!name) { toast('Enter your name'); return; }
+        // No account exists yet after this — signup only emails a code.
+        // See submitOtpVerification() for where the account is actually
+        // created and the session actually starts.
         await AuthApi.register({ email, password, display_name: name });
-      } else {
-        await AuthApi.login({ email, password });
+        state.pendingOtpEmail = email;
+        state.authMode = 'otp';
+        renderAuthScreen();
+        toast('Code sent — check your email');
+        return;
       }
+      await AuthApi.login({ email, password });
       session.user = await AuthApi.me();
       toast(`Welcome${session.user.display_name ? ', ' + session.user.display_name : ''} 👋`);
       await enterApp();
@@ -543,6 +559,8 @@ async function submitAuth(){
       // but a failed login attempt is ALSO a 401 with nobody logged in
       // yet, so that branch was overwriting the backend's actual
       // "Wrong email or password." with a confusing, wrong message.
+      // (This toast is now actually visible too — see the fix moving
+      // #toast out from inside #app, which is display:none here.)
       if (err.isNetworkError) { toast("Can't reach the server — check your connection"); return; }
       if (err instanceof ApiError && err.status === 409) {
         // Signup: email already registered — point at login instead of
@@ -554,6 +572,71 @@ async function submitAuth(){
       toast((err instanceof ApiError && err.message) || (state.authMode === 'register' ? "Couldn't create your account" : 'Wrong email or password.'));
     }
   });
+}
+
+let otpResendCooldownUntil = 0;
+function startOtpResendCooldown(seconds){
+  otpResendCooldownUntil = Date.now() + seconds * 1000;
+  tickOtpResendButton();
+}
+function tickOtpResendButton(){
+  const btn = document.getElementById('otpResendBtn');
+  if (!btn) return;
+  const remaining = Math.ceil((otpResendCooldownUntil - Date.now()) / 1000);
+  if (remaining > 0) {
+    btn.style.opacity = '0.5';
+    btn.style.pointerEvents = 'none';
+    btn.textContent = `Resend code (${remaining}s)`;
+    setTimeout(tickOtpResendButton, 1000);
+  } else {
+    btn.style.opacity = '';
+    btn.style.pointerEvents = '';
+    btn.textContent = 'Resend code';
+  }
+}
+
+async function submitOtpVerification(){
+  const btn = document.getElementById('otpSubmitBtn');
+  await withBusy(btn, async () => {
+    const otp = (document.getElementById('otpInput').value || '').trim();
+    if (!/^\d{6}$/.test(otp)) { toast('Enter the 6-digit code'); return; }
+    try {
+      await AuthApi.verifySignupOtp(state.pendingOtpEmail, otp);
+      session.user = await AuthApi.me();
+      state.pendingOtpEmail = null;
+      toast(`Welcome${session.user.display_name ? ', ' + session.user.display_name : ''} 👋`);
+      await enterApp();
+    } catch (err) {
+      if (err.isNetworkError) { toast("Can't reach the server — check your connection"); return; }
+      // 429 here is the MAX_OTP_ATTEMPTS case ("Too many attempts...")
+      // — the backend's own message is already the right copy.
+      toast((err instanceof ApiError && err.message) || 'Incorrect verification code.');
+    }
+  });
+}
+
+async function resendOtp(btn){
+  if (Date.now() < otpResendCooldownUntil) return;
+  await withBusy(btn, async () => {
+    try {
+      await AuthApi.resendSignupOtp(state.pendingOtpEmail);
+      toast('New code sent');
+      startOtpResendCooldown(45);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 429) {
+        toast(err.message); // "Please wait Ns before requesting another code."
+        const match = /(\d+)s/.exec(err.message || '');
+        startOtpResendCooldown(match ? parseInt(match[1], 10) : 45);
+        return;
+      }
+      handleApiError(err, "Couldn't resend the code");
+    }
+  });
+}
+
+function cancelOtpVerification(){
+  state.pendingOtpEmail = null;
+  setAuthMode('register');
 }
 
 async function logout(){
@@ -1152,27 +1235,16 @@ async function renderProfile(){
       ? myInterests.map(i => `<span>${escapeHtml(i)}</span>`).join('')
       : `<span style="opacity:0.6;">No interests added yet</span>`;
   }
-  const verifyEl = document.getElementById('verifyBanner');
-  if (verifyEl) {
-    // Only meaningfully actionable once a mail provider is configured
-    // and REQUIRE_EMAIL_VERIFICATION is on (see backend/app/config.py)
-    // — until then this is just an informational nudge, never a block.
-    verifyEl.innerHTML = (session.user.email_verified === false) ? `
-      <div class="verify-banner">
-        <div class="t">📧 Verify your email</div>
-        <div class="s">Check your inbox for a verification link, or resend one below.</div>
-        <button onclick="AroundApp.resendVerificationEmail(this)">Resend verification email</button>
-      </div>` : '';
-  }
-}
-
-async function resendVerificationEmail(btn){
-  await withBusy(btn, async () => {
-    try {
-      const res = await AuthApi.resendVerification();
-      toast(res.status === 'already_verified' ? "You're already verified" : 'Verification email sent — check your inbox');
-    } catch (err) { handleApiError(err, "Couldn't send that right now"); }
-  });
+  // No verify-banner here anymore: signup now verifies email via OTP
+  // *before* an account exists at all (see the auth screen's OTP step),
+  // so every account reaching this screen is already verified by
+  // construction. (A handful of accounts created under the previous
+  // link-based flow, before this change, may still have
+  // email_verified=false — that flag no longer gates anything, per
+  // app/config.py's REQUIRE_EMAIL_VERIFICATION, and there's no
+  // resend-for-an-existing-account flow to point them at anymore; this
+  // is an accepted, harmless, one-time edge case, not something a
+  // banner needs to surface.)
 }
 
 /* ============================================================
@@ -2400,6 +2472,7 @@ async function submitReportProblem(btn){
    ============================================================ */
 window.AroundApp = {
   state, go, setView, setAuthMode, submitAuth, googleStub, logout, toast, enterDemoMode,
+  submitOtpVerification, resendOtp, cancelOtpVerification,
   endImFree: endImFreeAction, openFree, setFree, activateFree,
   setMapFilter, previewPin, closeMapPreview, openEvent, openUserProfile, closeUserProfile,
   sendFriendRequest, respondFriendRequest, blockUserAction, openReportProblem, submitReportProblem,
@@ -2414,7 +2487,6 @@ window.AroundApp = {
   joinEventFlow, leaveEventFlow, requestToJoinFlow, cancelRequestFlow, redeemInviteCode,
   joinWaitlist, leaveWaitlist, claimWaitlistOffer,
   inviteGuestSubmit, cancelMyGuest, sendChat, selfCheckIn, openQrScanner, closeQrScanner,
-  resendVerificationEmail,
   openFriendsList, openEditProfile, toggleInterest, filterInterestPicker, saveEditProfile,
   openDmThread, closeDmThread, sendDmMessage,
   triggerInstallPrompt, dismissInstallBanner,

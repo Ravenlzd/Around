@@ -522,6 +522,7 @@ input,textarea{font-family:inherit; color:inherit; background:none; border:none;
 .cat-opt .e{ font-size:22px; }
 .cat-opt .t{ font-size:10.5px; margin-top:6px; font-weight:600; color:var(--text-dim); }
 .text-input, .textarea-input{ width:100%; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-sm); padding:13px 14px; font-size:14px; }
+.otp-input{ text-align:center; font-family:var(--font-mono); font-size:26px; font-weight:700; letter-spacing:0.5em; padding-left:calc(14px + 0.5em); }
 .textarea-input{ min-height:70px; resize:none; }
 .field-row2{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }
 .spots-stepper{ display:flex; align-items:center; gap:14px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-sm); padding:10px 16px; justify-content:space-between; }
@@ -540,9 +541,17 @@ input,textarea{font-family:inherit; color:inherit; background:none; border:none;
 .dist-row button{ flex:1; padding:11px 4px; border-radius:100px; background:var(--surface); border:1px solid var(--border); font-size:12px; font-weight:700; color:var(--text-dim); }
 .dist-row button.selected{ background:var(--accent); color:var(--accent-ink); border-color:var(--accent); }
 
-/* toast */
-.toast{ position:absolute; top:16px; left:16px; right:16px; z-index:200; background:var(--text); color:var(--bg); padding:13px 16px; border-radius:100px; font-weight:700; font-size:13px; text-align:center; transform:translateY(-80px); transition:transform .3s cubic-bezier(.2,.8,.2,1); }
-.toast.show{ transform:translateY(0); }
+/* toast — position:fixed (viewport-relative) + centered, since this
+   element is now a direct child of body rather than #app, so it can
+   no longer rely on #app's own 430px/position:relative box to size
+   and place itself against. */
+.toast{
+  position:fixed; top:calc(16px + env(safe-area-inset-top,0px)); left:50%; transform:translateX(-50%) translateY(-80px);
+  width:min(398px, calc(100% - 32px)); z-index:200;
+  background:var(--text); color:var(--bg); padding:13px 16px; border-radius:100px; font-weight:700; font-size:13px; text-align:center;
+  transition:transform .3s cubic-bezier(.2,.8,.2,1);
+}
+.toast.show{ transform:translateX(-50%) translateY(0); }
 
 .empty-state{ text-align:center; padding:50px 30px; color:var(--text-faint); }
 .empty-state .e{ font-size:36px; margin-bottom:10px; }
@@ -696,14 +705,20 @@ input,textarea{font-family:inherit; color:inherit; background:none; border:none;
 </head>
 <body>
 
+<!-- TOAST — a direct child of body (not #app) so it's visible while
+     #authScreen is showing too: #app is display:none until login, and
+     display:none on an ancestor hides everything inside it regardless
+     of the toast's own z-index/position. This is why "Wrong email or
+     password" and every other auth-screen error was silently invisible
+     — the message was rendering correctly into a hidden subtree. -->
+<div class="toast" id="toast"></div>
+
 <div id="authScreen" style="display:flex;">
   <div class="auth-card" id="authContent"></div>
 </div>
 
 <div id="app" style="display:none;">
 
-  <!-- TOAST -->
-  <div class="toast" id="toast"></div>
 
   <!-- PWA INSTALL PROMPT -->
   <div class="install-banner" id="installBanner">
@@ -785,7 +800,6 @@ input,textarea{font-family:inherit; color:inherit; background:none; border:none;
       <button class="icon-btn" onclick="AroundApp.openEditProfile()" title="Edit profile">✏️</button>
     </div>
     <div class="scroll-clear-nav">
-      <div id="verifyBanner"></div>
       <div class="profile-hero">
         <div class="avatar-upload-wrap">
           <div class="profile-avatar" id="profileAvatarInitial">?</div>

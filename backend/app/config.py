@@ -39,9 +39,10 @@ class Settings(BaseSettings):
     SMTP_PASSWORD: str = ""
     SMTP_FROM_EMAIL: str = "no-reply@around.lt"
     SMTP_USE_TLS: bool = True
-    # Base URL used to build the verification link sent by email — must
-    # be the real production frontend origin (e.g. https://around.lt),
-    # not the backend's own URL.
+    # Not read by the current OTP signup flow (the code is emailed as
+    # plain text, deliberately never a URL — see email_sender.py). Kept
+    # as a setting for whatever future flow needs a real frontend link
+    # in an email (e.g. password reset) rather than removed and re-added.
     PUBLIC_APP_URL: str = "http://localhost:5500"
     # Master switch for actually BLOCKING unverified accounts from
     # sensitive actions. Defaults to False deliberately: with no SMTP

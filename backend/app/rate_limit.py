@@ -18,6 +18,8 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from app.config import settings
+
 # path prefix -> (max requests, window in seconds, method or None for any)
 #
 # The method field exists because /users/me is shared by frequent reads
@@ -29,7 +31,11 @@ from starlette.middleware.base import BaseHTTPMiddleware
 LIMITS = {
     "/auth/login": (10, 60, None),
     "/auth/signup": (5, 60, None),
-    "/auth/resend-verification": (3, 300, None),
+    "/auth/resend-signup-otp": (3, 300, None),
+    # Defense in depth alongside PendingSignup.attempt_count (which
+    # caps *wrong-guess* attempts per pending signup regardless of IP);
+    # this caps request volume per IP regardless of correctness.
+    "/auth/verify-signup-otp": (10, 60, None),
     # media uploads are authenticated (unlike the two above), so this
     # limits per-IP rather than the more useful per-user — good enough
     # to stop naive disk-filling abuse without adding a second limiter
@@ -43,6 +49,19 @@ _hits: dict[str, deque] = defaultdict(deque)
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
+        # This is a per-process, in-memory, IP-keyed counter (see module
+        # docstring) that persists for the life of the process — including
+        # a whole pytest run. httpx's ASGITransport test client generally
+        # doesn't populate a distinct request.client per test, so every
+        # rate-limited call across an entire test session shares one
+        # bucket; enough integration tests calling e.g. /auth/signup would
+        # eventually 429 *unrelated* later tests, not just the ones
+        # actually testing rate limiting. The business-logic limits that
+        # matter for correctness (PendingSignup.attempt_count,
+        # RESEND_COOLDOWN) are enforced in app/routers/auth.py regardless
+        # of this bypass and are what the OTP tests actually exercise.
+        if settings.ENV == "testing":
+            return await call_next(request)
         limit_cfg = None
         for prefix, cfg in LIMITS.items():
             if request.url.path.startswith(prefix) and (cfg[2] is None or cfg[2] == request.method):
