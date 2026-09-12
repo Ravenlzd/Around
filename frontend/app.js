@@ -467,7 +467,7 @@ function go(screen){
   if(map[screen]) document.getElementById(map[screen]).classList.add('active');
   state.currentScreen = screen;
   if(screen==='discover') renderDiscover();
-  if(screen==='activity') renderActivity();
+  if(screen==='activity') openActivity();
   if(screen==='profile') renderProfile();
 }
 function backFromActivity(){ go(state.activityReturnScreen || 'home'); }
@@ -577,7 +577,7 @@ function ensureLeafletMap(){
   if (!container) return null;
 
   leafletMap = L.map(container, { zoomControl: true, attributionControl: true }).setView([geo.lat, geo.lng], 14);
-  const tileUrl = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png' + (CARTO_API_KEY ? `?api_key=${encodeURIComponent(CARTO_API_KEY)}` : '');
+  const tileUrl = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png' + (CARTO_API_KEY ? `key=${encodeURIComponent(CARTO_API_KEY)}` : '');
   L.tileLayer(tileUrl, {
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
     subdomains: 'abcd', maxZoom: 19,
@@ -783,6 +783,27 @@ async function markNotifRead(id){
   catch (err) { handleApiError(err); }
 }
 
+/**
+ * Opening Activity previously only re-rendered from whatever was
+ * already in the in-memory `notifications` array — it never called the
+ * backend's existing POST /notifications/read-all, so the unread badge
+ * kept showing the same stale count until every item was clicked one
+ * by one. This marks everything read (server-side, via the endpoint
+ * that already existed and was already wrapped as NotificationsApi.
+ * markAllRead — just never called from anywhere) as soon as the screen
+ * is actually viewed, then re-renders so the badge clears immediately.
+ */
+async function openActivity(){
+  renderActivity();
+  if (demoMode) return; // sample data isn't backed by a real endpoint — nothing to mark read
+  if (!notifications.some(n => !n.read)) return;
+  try {
+    await NotificationsApi.markAllRead();
+    notifications = notifications.map(n => ({ ...n, read: true }));
+    renderActivity();
+  } catch (_) { /* non-critical — badge just stays as-is until the next successful view */ }
+}
+
 /* ============================================================
    PROFILE
    ============================================================ */
@@ -827,18 +848,42 @@ async function openUserProfile(userId, sourceEventId){
     const avatar = profile.avatar_url
       ? `<img src="${MediaApi.absoluteMediaUrl(profile.avatar_url)}" alt=""/>`
       : escapeHtml(initials(profile.display_name));
+    const isSelf = profile.friendship_status === 'self';
     document.getElementById('userProfileContent').innerHTML = `
       <div class="profile-hero">
         <div class="profile-avatar">${avatar}</div>
         <div class="profile-name">${escapeHtml(profile.display_name)}</div>
-        ${profile.university_or_work ? `<div class="profile-loc">${escapeHtml(profile.university_or_work)}</div>` : ''}
+        <div class="profile-loc">${profile.university_or_work ? escapeHtml(profile.university_or_work) : ''}</div>
         ${profile.bio ? `<div class="ed-desc">${escapeHtml(profile.bio)}</div>` : ''}
         ${renderFriendAction(profile.friendship_status, userId)}
+        ${isSelf ? '' : `<button class="block-user-link" onclick="AroundApp.blockUserAction('${userId}')">🚫 Block user</button>`}
       </div>`;
   } catch (err) {
     document.getElementById('userProfileContent').innerHTML = `<div class="empty-state"><div class="e">⚠️</div><div class="t">This profile isn't available.</div></div>`;
     handleApiError(err);
   }
+}
+
+async function blockUserAction(userId){
+  if (blockedInDemo()) return;
+  // Read the already-escaped, already-rendered name back out of the DOM
+  // (via textContent, not re-injected) rather than threading a
+  // user-controlled display name through an inline onclick="" string,
+  // which would be an HTML-attribute-escaping trap for any name
+  // containing a quote character.
+  const nameEl = document.querySelector('#userProfileContent .profile-name');
+  const displayName = nameEl ? nameEl.textContent : 'this person';
+  if (!confirm(`Block ${displayName}? They won't be able to see your profile, and you won't see each other in Discover or I'm Free.`)) return;
+  try {
+    await UsersApi.blockUser(userId);
+    toast(`Blocked ${displayName}`);
+    closeUserProfile();
+    // Blocked users are excluded server-side from /discovery/people and
+    // /im-free/nearby — refresh whichever of those lists is currently
+    // loaded so the person disappears immediately instead of lingering
+    // until the next natural refresh.
+    if (state.currentScreen === 'discover') renderPeopleNearby();
+  } catch (err) { handleApiError(err); }
 }
 
 /**
@@ -1828,13 +1873,42 @@ async function publishPost(btn){
 }
 
 /* ============================================================
+   REPORT A PROBLEM
+
+   Previously a static toast with nothing behind it. Reuses the same
+   Report model events.py's per-event report endpoint already writes
+   to (see backend/app/routers/users.py's report_problem()) rather than
+   inventing a separate feedback mechanism.
+   ============================================================ */
+function openReportProblem(){
+  document.getElementById('reportContent').innerHTML = `
+    <div class="field-label">What went wrong?</div>
+    <textarea class="textarea-input" id="reportText" style="min-height:120px;" placeholder="Describe the problem — what happened, what you expected, and any steps to reproduce it…" maxlength="1000"></textarea>
+    <button class="next-btn" id="reportSubmitBtn" onclick="AroundApp.submitReportProblem(this)">Submit report</button>
+  `;
+  openSheet('sheetReport');
+}
+async function submitReportProblem(btn){
+  if (blockedInDemo()) return;
+  await withBusy(btn, async () => {
+    const msg = document.getElementById('reportText').value.trim();
+    if (!msg) { toast('Describe the problem first'); return; }
+    try {
+      await UsersApi.reportProblem(msg);
+      closeAllSheets();
+      toast("Thanks — we've received your report");
+    } catch (err) { handleApiError(err, "Couldn't submit that report"); }
+  });
+}
+
+/* ============================================================
    PUBLIC API — everything the inline onclick="" handlers call
    ============================================================ */
 window.AroundApp = {
   state, go, setView, setAuthMode, submitAuth, googleStub, logout, toast, enterDemoMode,
   endImFree: endImFreeAction, openFree, setFree, activateFree,
   setMapFilter, previewPin, closeMapPreview, openEvent, openUserProfile, closeUserProfile,
-  sendFriendRequest, respondFriendRequest,
+  sendFriendRequest, respondFriendRequest, blockUserAction, openReportProblem, submitReportProblem,
   setDiscoverCat, filterTonight, onSearchInput, loadMoreSearchResults,
   markNotifRead, backFromActivity,
   openManage, approveRequest, rejectRequest, toggleCheckIn, confirmDangerClick, toggleQR, refreshCheckinQr, copyCheckinToken,
