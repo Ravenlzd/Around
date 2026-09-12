@@ -47,6 +47,12 @@ class User(Base):
     restrict_messages: Mapped[str] = mapped_column(String, default="everyone")
     last_location = mapped_column(Geography("POINT", srid=4326), nullable=True)
     status: Mapped[str] = mapped_column(String, default="active")
+    # New accounts start unverified; existing accounts were backfilled to
+    # True by migrations/versions/0003 (see that file for why: nobody
+    # should retroactively get locked out by a feature added after they
+    # already signed up). See app/config.py's REQUIRE_EMAIL_VERIFICATION
+    # for why this doesn't gate anything until a mail provider is live.
+    email_verified: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
 
@@ -276,5 +282,43 @@ class Notification(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
     type: Mapped[str] = mapped_column(String)
     payload: Mapped[dict] = mapped_column(JSONB, default=dict)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class EmailVerificationToken(Base):
+    """
+    Single-use, expiring, hashed tokens for the email-verification link
+    (app/routers/auth.py). The token itself is only ever held by the
+    user (in the emailed link) — only its SHA-256 hash is stored, so a
+    database read can't be turned into a usable verification link.
+    """
+    __tablename__ = "email_verification_tokens"
+    id: Mapped[uuid.UUID] = uuid_pk()
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
+    token_hash: Mapped[str] = mapped_column(String, unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class DirectMessage(Base):
+    """
+    Friend-to-friend chat (app/routers/chat.py). This table already
+    existed in schema.sql/production from 0001_initial — this class was
+    the missing piece models.py's own module docstring called out
+    ("...direct_messages...follow the same pattern and are omitted here
+    for brevity — add them the same way...when those features are built
+    out"). Deliberately NOT adding a separate conversations table: a
+    "conversation" is just the set of rows between two user ids, the
+    same way a Friendship is identified by its ordered pair — no new
+    concept, just a query shape (see idx_dm_thread in schema.sql, built
+    for exactly this lookup).
+    """
+    __tablename__ = "direct_messages"
+    id: Mapped[uuid.UUID] = uuid_pk()
+    sender_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
+    recipient_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
+    body: Mapped[str] = mapped_column(Text)
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)

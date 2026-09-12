@@ -68,7 +68,7 @@ jobs:
 
       - name: Run real integration tests (against live Postgres/PostGIS)
         working-directory: backend
-        run: python3 -m pytest tests/test_api_integration.py -v
+        run: python3 -m pytest tests/test_api_integration.py tests/test_new_social_features.py -v
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -77,4 +77,4 @@ jobs:
 
       - name: Frontend syntax check
         working-directory: frontend
-        run: node --check app.js
+        run: node --check app.js && for f in api/*.js; do node --check "$f"; done

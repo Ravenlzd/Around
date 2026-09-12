@@ -18,15 +18,24 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
-# path prefix -> (max requests, window in seconds)
+# path prefix -> (max requests, window in seconds, method or None for any)
+#
+# The method field exists because /users/me is shared by frequent reads
+# (GET, on every app boot) and the one write worth limiting (PATCH,
+# profile edits — spam-editing a nickname/bio is the actual abuse case,
+# per spec §5's moderation section). Without it, limiting "/users/me"
+# would also throttle normal profile-loading GETs, which was never the
+# intent.
 LIMITS = {
-    "/auth/login": (10, 60),
-    "/auth/signup": (5, 60),
+    "/auth/login": (10, 60, None),
+    "/auth/signup": (5, 60, None),
+    "/auth/resend-verification": (3, 300, None),
     # media uploads are authenticated (unlike the two above), so this
     # limits per-IP rather than the more useful per-user — good enough
     # to stop naive disk-filling abuse without adding a second limiter
     # keyed on user id for what's still a single-instance MVP.
-    "/media/upload": (20, 60),
+    "/media/upload": (20, 60, None),
+    "/users/me": (15, 60, "PATCH"),
 }
 
 _hits: dict[str, deque] = defaultdict(deque)
@@ -36,11 +45,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         limit_cfg = None
         for prefix, cfg in LIMITS.items():
-            if request.url.path.startswith(prefix):
+            if request.url.path.startswith(prefix) and (cfg[2] is None or cfg[2] == request.method):
                 limit_cfg = cfg
                 break
         if limit_cfg:
-            max_requests, window = limit_cfg
+            max_requests, window, _method = limit_cfg
             client_ip = request.client.host if request.client else "unknown"
             key = f"{client_ip}:{request.url.path}"
             now = time.monotonic()

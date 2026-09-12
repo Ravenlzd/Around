@@ -8,13 +8,17 @@ from pydantic import BaseModel, EmailStr, Field
 class SignupRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8)
-    display_name: str
+    display_name: str = Field(min_length=2, max_length=40)
     city: str = "Vilnius"
 
 
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
+
+
+class VerifyEmailRequest(BaseModel):
+    token: str
 
 
 class TokenResponse(BaseModel):
@@ -33,6 +37,7 @@ class UserOut(BaseModel):
     location_precision: str
     hide_from_nearby: bool
     restrict_messages: str
+    email_verified: bool = True
 
     class Config:
         from_attributes = True
@@ -61,9 +66,9 @@ class ReportProblemCreate(BaseModel):
 
 
 class ProfileUpdate(BaseModel):
-    display_name: str | None = None
+    display_name: str | None = Field(default=None, min_length=2, max_length=40)
     university_or_work: str | None = None
-    bio: str | None = None
+    bio: str | None = Field(default=None, max_length=280)
     avatar_url: str | None = None
     location_precision: Literal["approximate", "exact_to_participants"] | None = None
     hide_from_nearby: bool | None = None

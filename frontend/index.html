@@ -41,6 +41,15 @@ body{
   display:flex;
   justify-content:center;
   min-height:100vh;
+  /* 100vh on mobile Safari is the viewport height with the address bar
+     and bottom toolbar HIDDEN (the largest the page ever gets) — when
+     the toolbar is showing, the actually-visible area is shorter than
+     that, which is what let the fixed-inside-#app bottom nav end up
+     overlapping content/getting overlapped by Safari's own UI. 100dvh
+     tracks the real, current visible viewport as the toolbar shows and
+     hides. Kept as a second declaration (not a replacement) so browsers
+     without dvh support silently keep the 100vh value above. */
+  min-height:100dvh;
   -webkit-font-smoothing:antialiased;
 }
 button{font-family:inherit; border:none; background:none; color:inherit; cursor:pointer;}
@@ -53,6 +62,7 @@ input,textarea{font-family:inherit; color:inherit; background:none; border:none;
   width:100%;
   max-width:430px;
   min-height:100vh;
+  min-height:100dvh;
   background:
     radial-gradient(ellipse 600px 300px at 50% -10%, rgba(200,255,62,0.07), transparent),
     var(--bg);
@@ -333,6 +343,36 @@ input,textarea{font-family:inherit; color:inherit; background:none; border:none;
 .notif-item.unread .nicon{ background:rgba(200,255,62,0.14); }
 .notif-action-row{ display:flex; gap:8px; margin-top:8px; }
 
+/* ============ CHAT ============ */
+.conversation-item{ display:flex; gap:12px; padding:13px 20px; border-bottom:1px solid var(--border); align-items:center; cursor:pointer; }
+.conversation-item:active{ background:var(--surface-2); }
+.conversation-item .cav{ width:46px; height:46px; border-radius:50%; flex-shrink:0; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:16px; overflow:hidden; }
+.conversation-item .cav img{ width:100%; height:100%; object-fit:cover; }
+.conversation-item .cbody{ flex:1; min-width:0; }
+.conversation-item .cname{ font-weight:700; font-size:14px; display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.conversation-item .ctime{ font-size:10px; color:var(--text-faint); font-family:var(--font-mono); font-weight:600; flex-shrink:0; }
+.conversation-item .clast{ font-size:12.5px; color:var(--text-dim); margin-top:3px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.conversation-item.unread .clast{ color:var(--text); font-weight:600; }
+.conversation-item .cunread{ min-width:18px; height:18px; padding:0 5px; border-radius:100px; background:var(--accent); color:var(--accent-ink); font-size:10px; font-weight:800; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+.dm-thread-scroll{ flex:1; overflow-y:auto; padding:14px 20px; min-height:0; }
+.dm-input-row{ display:flex; gap:8px; align-items:center; padding:10px 20px calc(14px + env(safe-area-inset-bottom,0px)) 20px; border-top:1px solid var(--border); flex-shrink:0; }
+.dm-input-row input{ flex:1; background:var(--surface); border:1px solid var(--border); border-radius:100px; padding:11px 16px; font-size:13.5px; }
+.dm-input-row button{ width:38px; height:38px; border-radius:50%; background:var(--accent); color:var(--accent-ink); font-weight:800; flex-shrink:0; }
+
+/* ============ EDIT PROFILE / INTERESTS PICKER ============ */
+.selected-interests{ display:flex; flex-wrap:wrap; gap:6px; min-height:32px; }
+.selected-interests .rm-chip{ display:flex; align-items:center; gap:6px; font-size:11.5px; font-weight:700; padding:6px 8px 6px 12px; border-radius:100px; background:var(--accent); color:var(--accent-ink); }
+.selected-interests .rm-chip button{ width:16px; height:16px; border-radius:50%; background:rgba(10,10,13,0.2); display:flex; align-items:center; justify-content:center; font-size:10px; }
+.interest-group-label{ font-size:10.5px; font-weight:700; color:var(--text-faint); text-transform:uppercase; letter-spacing:0.05em; font-family:var(--font-mono); margin:14px 0 8px 0; }
+.interest-picker-grid{ display:flex; flex-wrap:wrap; gap:8px; }
+.interest-opt{ font-size:12px; font-weight:600; padding:8px 13px; border-radius:100px; background:var(--surface); border:1px solid var(--border); color:var(--text-dim); }
+.interest-opt.selected{ background:var(--accent); color:var(--accent-ink); border-color:var(--accent); font-weight:800; }
+.avatar-edit-btn-lg{ position:absolute; bottom:0; right:0; width:32px; height:32px; border-radius:50%; background:var(--accent); color:var(--accent-ink); border:3px solid var(--bg); display:flex; align-items:center; justify-content:center; font-size:14px; }
+.verify-banner{ margin:0 20px 16px 20px; padding:14px; border-radius:var(--radius-md); background:rgba(200,255,62,0.08); border:1px solid rgba(200,255,62,0.3); }
+.verify-banner .t{ font-weight:700; font-size:13px; }
+.verify-banner .s{ font-size:11.5px; color:var(--text-dim); margin-top:4px; line-height:1.4; }
+.verify-banner button{ margin-top:8px; font-size:11.5px; font-weight:700; color:var(--accent); }
+
 /* ============ PROFILE ============ */
 .profile-hero{ padding:10px 20px 20px 20px; text-align:center; }
 .profile-avatar{ width:78px; height:78px; border-radius:50%; margin:0 auto 12px auto; background:linear-gradient(135deg,var(--accent),var(--blue)); display:flex; align-items:center; justify-content:center; font-family:var(--font-display); font-weight:900; font-size:28px; color:var(--accent-ink); overflow:hidden; }
@@ -370,17 +410,22 @@ input,textarea{font-family:inherit; color:inherit; background:none; border:none;
   position:absolute; left:0; right:0; bottom:0;
   background:rgba(10,10,13,0.85); backdrop-filter:blur(16px);
   border-top:1px solid var(--border);
-  display:flex; padding:10px 12px calc(10px + env(safe-area-inset-bottom,0px)) 12px;
+  display:flex; padding:9px 4px calc(9px + env(safe-area-inset-bottom,0px)) 4px;
   z-index:50;
 }
-.navbtn{ flex:1; display:flex; flex-direction:column; align-items:center; gap:4px; padding:4px 0; color:var(--text-faint); }
-.navbtn .ic{ font-size:19px; }
-.navbtn .lb{ font-size:9.5px; font-weight:700; font-family:var(--font-mono); letter-spacing:0.02em; }
+/* 6 items (Around/Discover/Create/Chat/Activity/Profile) — tighter gap
+   and slightly smaller icon/label than the original 5-item layout so
+   every button still gets a comfortable tap target down to ~360px
+   viewports, rather than overcrowding by leaving the original sizing. */
+.navbtn{ flex:1; display:flex; flex-direction:column; align-items:center; gap:3px; padding:4px 0; color:var(--text-faint); min-width:0; }
+.navbtn .ic{ font-size:17px; }
+.navbtn .lb{ font-size:8px; font-weight:700; font-family:var(--font-mono); letter-spacing:0.01em; white-space:nowrap; }
 .navbtn.active{ color:var(--text); }
 .navbtn.active .ic{ transform:translateY(-1px); }
+.navbtn .badge-dot{ position:absolute; margin-left:10px; margin-top:-2px; width:7px; height:7px; border-radius:50%; background:var(--coral); }
 .navbtn.create .ic{
-  width:38px; height:38px; border-radius:12px; background:var(--accent); color:var(--accent-ink);
-  display:flex; align-items:center; justify-content:center; font-weight:900; font-size:20px; margin-bottom:-2px;
+  width:34px; height:34px; border-radius:11px; background:var(--accent); color:var(--accent-ink);
+  display:flex; align-items:center; justify-content:center; font-weight:900; font-size:18px; margin-bottom:-2px;
 }
 
 /* ============ MODALS / SHEETS ============ */
@@ -574,7 +619,7 @@ input,textarea{font-family:inherit; color:inherit; background:none; border:none;
 
 /* ============ AUTH SCREEN ============ */
 #authScreen{
-  width:100%; max-width:430px; min-height:100vh;
+  width:100%; max-width:430px; min-height:100vh; min-height:100dvh;
   background: radial-gradient(ellipse 600px 300px at 50% -10%, rgba(200,255,62,0.07), transparent), var(--bg);
   display:flex; align-items:center; justify-content:center; padding:24px;
 }
@@ -661,32 +706,38 @@ input,textarea{font-family:inherit; color:inherit; background:none; border:none;
     <div style="overflow-y:auto; padding-bottom:100px;" id="activityList"></div>
   </div>
 
+  <!-- ============ CHAT ============ -->
+  <div class="screen" id="screen-chat">
+    <div class="topbar"><div class="brand" style="font-size:18px;">Chat</div><div></div></div>
+    <div style="overflow-y:auto; padding-bottom:100px;" id="conversationList"></div>
+  </div>
+
   <!-- ============ PROFILE ============ -->
   <div class="screen" id="screen-profile">
     <div class="topbar"><div class="brand" style="font-size:18px;">Profile</div>
-      <button class="icon-btn" onclick="AroundApp.toast('Settings coming soon')">⚙️</button>
+      <button class="icon-btn" onclick="AroundApp.openEditProfile()" title="Edit profile">✏️</button>
     </div>
     <div style="overflow-y:auto; padding-bottom:100px;">
+      <div id="verifyBanner"></div>
       <div class="profile-hero">
         <div class="avatar-upload-wrap">
           <div class="profile-avatar" id="profileAvatarInitial">?</div>
-          <button class="avatar-edit-btn" onclick="document.getElementById('avatarFileInput').click()">✏️</button>
-          <input type="file" id="avatarFileInput" accept="image/jpeg,image/png,image/webp,image/gif" style="display:none;" onchange="AroundApp.handleAvatarFileChosen(this)"/>
         </div>
         <div class="profile-name" id="profileNameDisplay">Loading…</div>
         <div class="profile-loc" id="profileLocDisplay">Vilnius 🇱🇹</div>
         <div id="trustBadgeRow" style="margin-top:6px;"></div>
-        <div class="profile-interests">
-          <span>AI</span><span>Fashion</span><span>Gym</span><span>Cars</span><span>Nightlife</span>
-        </div>
+        <div class="profile-interests" id="profileInterestsRow"></div>
       </div>
       <div class="stat-row">
         <div class="stat-box"><div class="n" id="statUpcoming">—</div><div class="l">Upcoming</div></div>
         <div class="stat-box"><div class="n" id="statHosting">—</div><div class="l">Hosting</div></div>
-        <div class="stat-box"><div class="n" id="statFriends">—</div><div class="l">Friends</div></div>
+        <div class="stat-box" style="cursor:pointer;" onclick="AroundApp.openFriendsList()"><div class="n" id="statFriends">—</div><div class="l">Friends</div></div>
       </div>
       <div class="section-label" style="padding-left:20px;">Upcoming</div>
       <div id="profileUpcoming" style="padding:0 20px; display:flex; flex-direction:column; gap:10px; margin-bottom:6px;"></div>
+      <div class="section-label" style="padding-left:20px; margin-top:16px;">Account</div>
+      <div class="settings-row" onclick="AroundApp.openEditProfile()"><div class="l1">✏️ Edit profile</div><span style="color:var(--text-faint)">›</span></div>
+      <div class="settings-row" onclick="AroundApp.openFriendsList()"><div class="l1">👥 Friends</div><span style="color:var(--text-faint)">›</span></div>
       <div class="section-label" style="padding-left:20px; margin-top:16px;">Privacy & safety</div>
       <div class="settings-row"><div class="l1">📍 Approximate location only</div><div class="toggle on" onclick="this.classList.toggle('on')"></div></div>
       <div class="settings-row"><div class="l1">🙈 Hide profile from nearby users</div><div class="toggle" onclick="this.classList.toggle('on')"></div></div>
@@ -702,6 +753,7 @@ input,textarea{font-family:inherit; color:inherit; background:none; border:none;
     <button class="navbtn active" id="nav-home" onclick="AroundApp.go('home')"><span class="ic">🧭</span><span class="lb">AROUND</span></button>
     <button class="navbtn" id="nav-discover" onclick="AroundApp.go('discover')"><span class="ic">🔎</span><span class="lb">DISCOVER</span></button>
     <button class="navbtn create" onclick="AroundApp.openCreate()"><span class="ic">+</span></button>
+    <button class="navbtn" id="nav-chat" onclick="AroundApp.go('chat')" style="position:relative;"><span class="ic">💬</span><span class="lb">CHAT</span><span class="badge-dot" id="chatBadgeDot" hidden></span></button>
     <button class="navbtn" id="nav-activity" onclick="AroundApp.go('activity')"><span class="ic">⚡</span><span class="lb">ACTIVITY</span></button>
     <button class="navbtn" id="nav-profile" onclick="AroundApp.go('profile')"><span class="ic">👤</span><span class="lb">PROFILE</span></button>
   </div>
@@ -762,6 +814,36 @@ input,textarea{font-family:inherit; color:inherit; background:none; border:none;
       <div></div>
     </div>
     <div class="sheet-scroll" id="userProfileContent"></div>
+  </div>
+
+  <div class="sheet" id="sheetDmThread">
+    <div class="sheet-header">
+      <button class="close" onclick="AroundApp.closeDmThread()" title="Back">←</button>
+      <div class="sheet-title" id="dmThreadTitle">Chat</div>
+      <div></div>
+    </div>
+    <div class="dm-thread-scroll" id="dmThreadMessages"></div>
+    <div class="dm-input-row">
+      <input id="dmMessageInput" placeholder="Message…" onkeydown="if(event.key==='Enter'){event.preventDefault(); AroundApp.sendDmMessage();}"/>
+      <button onclick="AroundApp.sendDmMessage()">➤</button>
+    </div>
+  </div>
+
+  <div class="sheet" id="sheetFriendsList">
+    <div class="sheet-header">
+      <button class="close" onclick="AroundApp.closeAllSheets()" title="Back">←</button>
+      <div class="sheet-title">Friends</div>
+      <div></div>
+    </div>
+    <div class="sheet-scroll" id="friendsListContent"></div>
+  </div>
+
+  <div class="sheet" id="sheetEditProfile">
+    <div class="sheet-header">
+      <div class="sheet-title">Edit profile</div>
+      <button class="close" onclick="AroundApp.closeAllSheets()">✕</button>
+    </div>
+    <div class="sheet-scroll" id="editProfileContent"></div>
   </div>
 
 </div>

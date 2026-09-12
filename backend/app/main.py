@@ -24,7 +24,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from app.routers import auth, events, discovery, imfree, posts, friends, notifications, users, media
+from app.routers import auth, events, discovery, imfree, posts, friends, notifications, users, media, chat
 from app.config import settings
 from app.expiry import expiry_loop
 from app.rate_limit import RateLimitMiddleware
@@ -85,6 +85,7 @@ app.include_router(posts.router, prefix="/posts", tags=["spontaneous-posts"])
 app.include_router(friends.router, prefix="/friends", tags=["friends"])
 app.include_router(notifications.router, prefix="/notifications", tags=["notifications"])
 app.include_router(media.router, prefix="/media", tags=["media"])
+app.include_router(chat.router, prefix="/chat", tags=["chat"])
 
 # Serves whatever media.py writes to MEDIA_ROOT back out as static files
 # at /media/<filename> — fine for local dev / a single small instance;

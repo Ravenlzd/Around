@@ -47,7 +47,7 @@ from app.schemas import (
     EventCreate, EventUpdate, EventOut, ChatMessageCreate, JoinRequestCreate, GuestInviteCreate,
     CheckInCreate, CheckInTokenOut, AttendanceOut, BanCreate,
 )
-from app.deps import get_current_user
+from app.deps import get_current_user, require_verified_user
 from app import attendance_rules as rules
 from app.location import reveal_location, reveal_coordinates
 from app.ws import chat_ws_manager
@@ -141,7 +141,7 @@ def _to_out(event: Event, occupancy: int, distance_km: float | None = None, host
 # ---------- create / read ----------
 
 @router.post("", response_model=EventOut, status_code=status.HTTP_201_CREATED)
-async def create_event(payload: EventCreate, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def create_event(payload: EventCreate, user: User = Depends(require_verified_user), db: AsyncSession = Depends(get_db)):
     event = Event(
         host_user_id=user.id,
         city_id=user.city_id,

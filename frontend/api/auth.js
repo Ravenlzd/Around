@@ -47,3 +47,12 @@ export async function hasStoredSession() {
   const token = await apiClient.tokens.get();
   return !!token;
 }
+
+/** @param {string} token — the raw token from the emailed link's ?verify_email= query param */
+export async function verifyEmail(token) {
+  return apiClient.post("/auth/verify-email", { token }, { auth: false });
+}
+
+export async function resendVerification() {
+  return apiClient.post("/auth/resend-verification", {});
+}

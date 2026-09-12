@@ -21,6 +21,7 @@ python-multipart==0.0.9
 pillow==10.4.0  # optional: enables image-dimension validation in app/routers/media.py; upload still works (minus that one check) if this isn't installed
 google-auth==2.34.0
 apscheduler==3.10.4
+better-profanity==0.7.0  # nickname/bio moderation (app/moderation.py) — real maintained wordlist + leetspeak handling, not a hardcoded few-word list
 
 # test-only (not needed to run the app itself)
 pytest==8.3.3

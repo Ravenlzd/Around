@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models import User, Friendship
-from app.deps import get_current_user
+from app.deps import get_current_user, require_verified_user
 
 router = APIRouter()
 
@@ -38,7 +38,7 @@ async def is_friends_with(db: AsyncSession, user_id: uuid.UUID, other_id: uuid.U
 
 
 @router.post("/request/{target_user_id}", status_code=status.HTTP_201_CREATED)
-async def send_request(target_user_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def send_request(target_user_id: uuid.UUID, user: User = Depends(require_verified_user), db: AsyncSession = Depends(get_db)):
     if target_user_id == user.id:
         raise HTTPException(400, "Can't friend yourself")
     target = await db.get(User, target_user_id)
@@ -94,11 +94,15 @@ async def reject_request(requester_id: uuid.UUID, user: User = Depends(get_curre
     if row and row.status == "pending":
         await db.delete(row)
         await db.commit()
+        from app.notify import notify
+        await notify(db, requester_id, "friend_declined", {"message": f"{user.display_name} declined your friend request."})
+        await db.commit()
     return {"status": "rejected"}
 
 
 @router.get("")
 async def list_friends(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """Used by both Profile's Friends section and the profile sheet's friendship_status lookups."""
     rows = (await db.scalars(
         select(Friendship).where(
             or_(Friendship.user_id_a == user.id, Friendship.user_id_b == user.id),
@@ -108,8 +112,8 @@ async def list_friends(user: User = Depends(get_current_user), db: AsyncSession 
     other_ids = [r.user_id_b if r.user_id_a == user.id else r.user_id_a for r in rows]
     if not other_ids:
         return []
-    users = (await db.execute(select(User.id, User.display_name).where(User.id.in_(other_ids)))).all()
-    return [{"user_id": str(uid), "display_name": name} for uid, name in users]
+    users = (await db.execute(select(User.id, User.display_name, User.avatar_url).where(User.id.in_(other_ids)))).all()
+    return [{"user_id": str(uid), "display_name": name, "avatar_url": avatar_url} for uid, name, avatar_url in users]
 
 
 @router.get("/requests")

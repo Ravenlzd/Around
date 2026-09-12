@@ -6,6 +6,7 @@ import * as PostsApi from './api/posts.js';
 import * as NotificationsApi from './api/notifications.js';
 import * as MediaApi from './api/media.js';
 import * as FriendsApi from './api/friends.js';
+import * as ChatApi from './api/chat.js';
 
 /* ============================================================
    AROUND — wired to a real FastAPI/PostgreSQL backend.
@@ -258,8 +259,29 @@ const DEMO_NOTIFICATIONS = [
 /* ============================================================
    BOOTSTRAP
    ============================================================ */
+async function checkEmailVerificationLink(){
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get('verify_email');
+  if (!token) return;
+  // Strip the token from the URL immediately regardless of outcome —
+  // it's single-use server-side anyway, and leaving it in the address
+  // bar (or history) after this page load is unnecessary exposure of a
+  // sensitive value for zero benefit.
+  params.delete('verify_email');
+  const qs = params.toString();
+  history.replaceState(null, '', window.location.pathname + (qs ? `?${qs}` : ''));
+  try {
+    await AuthApi.verifyEmail(token);
+    toast('Email verified ✅');
+    if (session.user) { session.user.email_verified = true; renderProfile(); }
+  } catch (err) {
+    toast((err instanceof ApiError && err.message) || "That verification link didn't work");
+  }
+}
+
 async function boot() {
   wireAuthScreen();
+  await checkEmailVerificationLink();
   backendReachable = await isBackendReachable();
   if (!backendReachable) {
     renderAuthScreen(); // re-render with the "backend unreachable" notice now that we know
@@ -280,7 +302,7 @@ async function boot() {
 async function enterApp() {
   showScreen('app');
   await resolveLocation();
-  await Promise.all([loadNearbyEvents(), loadNotifications(), loadNearbyPosts(), loadTrustState(), loadProfileStats()]);
+  await Promise.all([loadNearbyEvents(), loadNotifications(), loadNearbyPosts(), loadTrustState(), loadProfileStats(), loadMyInterests()]);
   renderImfreeBar();
   setView('map');
   renderProfile();
@@ -384,6 +406,12 @@ async function loadProfileStats() {
   catch (err) { console.error(err); }
 }
 
+let myInterests = [];
+async function loadMyInterests() {
+  try { myInterests = (await UsersApi.getMyInterests()).interests || []; }
+  catch (err) { console.error(err); }
+}
+
 /* ============================================================
    SCREENS (auth vs app)
    ============================================================ */
@@ -442,7 +470,21 @@ async function submitAuth(){
       toast(`Welcome${session.user.display_name ? ', ' + session.user.display_name : ''} 👋`);
       await enterApp();
     } catch (err) {
-      handleApiError(err, state.authMode === 'register' ? "Couldn't create your account" : 'Invalid email or password');
+      // Deliberately NOT handleApiError() here: its 401 branch assumes
+      // an already-logged-in session's token just expired (shows
+      // "session expired", wipes session.user, redirects to /auth) —
+      // but a failed login attempt is ALSO a 401 with nobody logged in
+      // yet, so that branch was overwriting the backend's actual
+      // "Wrong email or password." with a confusing, wrong message.
+      if (err.isNetworkError) { toast("Can't reach the server — check your connection"); return; }
+      if (err instanceof ApiError && err.status === 409) {
+        // Signup: email already registered — point at login instead of
+        // leaving the user stuck on a form that will never succeed.
+        toast(err.message);
+        setAuthMode('login');
+        return;
+      }
+      toast((err instanceof ApiError && err.message) || (state.authMode === 'register' ? "Couldn't create your account" : 'Wrong email or password.'));
     }
   });
 }
@@ -463,12 +505,13 @@ function go(screen){
   document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
   document.getElementById('screen-'+screen).classList.add('active');
   document.querySelectorAll('.navbtn').forEach(b=>b.classList.remove('active'));
-  const map={home:'nav-home',discover:'nav-discover',activity:'nav-activity',profile:'nav-profile'};
+  const map={home:'nav-home',discover:'nav-discover',activity:'nav-activity',profile:'nav-profile',chat:'nav-chat'};
   if(map[screen]) document.getElementById(map[screen]).classList.add('active');
   state.currentScreen = screen;
   if(screen==='discover') renderDiscover();
   if(screen==='activity') openActivity();
   if(screen==='profile') renderProfile();
+  if(screen==='chat') renderChatList();
 }
 function backFromActivity(){ go(state.activityReturnScreen || 'home'); }
 
@@ -802,6 +845,7 @@ function notifIcon(type){
     join_request:'👋', approved:'✅', rejected:'\u{1F6AB}', invited:'✉️', waitlist_offer:'🎉',
     reminder:'⏰', checked_in:'✅', event_updated:'\u270F\uFE0F', event_cancelled:'\u{1F534}',
     guest_invited:'👥', guest_cancelled:'\u{1F6AB}', friend_request:'🤝', friend_accepted:'🤝',
+    friend_declined:'\u{1F6AB}', direct_message:'💬',
     joined:'✅', spots_low:'\u{1F525}',
   }[type] || '✨';
 }
@@ -861,6 +905,126 @@ async function openActivity(){
 }
 
 /* ============================================================
+   CHAT (friend-to-friend direct messaging)
+
+   Reuses backend/app/routers/chat.py, which itself reuses the
+   direct_messages table and app/ws.py's ChatConnectionManager already
+   built for event chat (see that router's own docstring) — this is
+   the same HTTP-POST-to-persist + WebSocket-to-broadcast pattern
+   event chat already uses, applied to a friend pair instead of an
+   event id, not a separate design.
+
+   Note on data-* + this.dataset instead of embedding names in
+   onclick="..." strings below: a display name is user-controlled text
+   that can contain an apostrophe. escapeHtml() correctly turns that
+   into &#39; for an HTML attribute VALUE — but if that same escaped
+   text were interpolated into a JS string literal inside an onclick
+   attribute, the browser decodes &#39; back to a literal ' before
+   handing the attribute to the JS parser, breaking out of the string
+   early. Reading it back via this.dataset.name (already decoded, never
+   re-parsed as JS) avoids that trap entirely.
+   ============================================================ */
+let dmSocket = null;
+let currentDmFriendId = null;
+let conversationsCache = [];
+
+async function renderChatList(){
+  const el = document.getElementById('conversationList');
+  if (blockedInDemo()) { el.innerHTML = `<div class="empty-state"><div class="e">💬</div><div class="t">Chat needs a live backend — connect one to message friends.</div></div>`; return; }
+  el.innerHTML = `<div class="empty-mini" style="padding:20px;">Loading…</div>`;
+  try {
+    conversationsCache = await ChatApi.listConversations();
+    updateChatBadge(conversationsCache);
+    el.innerHTML = conversationsCache.length ? conversationsCache.map(c => {
+      const avatar = c.avatar_url
+        ? `<img src="${MediaApi.absoluteMediaUrl(c.avatar_url)}" alt=""/>`
+        : escapeHtml(initials(c.display_name));
+      const time = c.last_message_at ? new Date(c.last_message_at).toLocaleDateString(undefined,{month:'short',day:'numeric'}) : '';
+      return `<div class="conversation-item ${c.unread_count?'unread':''}" data-friend-id="${c.friend_user_id}" data-name="${escapeHtml(c.display_name)}" onclick="AroundApp.openDmThread(this.dataset.friendId, this.dataset.name)">
+        <div class="cav" style="background:${avColor(c.display_name)}30; color:${avColor(c.display_name)}">${avatar}</div>
+        <div class="cbody">
+          <div class="cname"><span>${escapeHtml(c.display_name)}</span><span class="ctime">${time}</span></div>
+          <div class="clast">${c.last_message ? escapeHtml(c.last_message) : 'Say hi \u{1F44B}'}</div>
+        </div>
+        ${c.unread_count ? `<div class="cunread">${c.unread_count}</div>` : ''}
+      </div>`;
+    }).join('') : `<div class="empty-state"><div class="e">💬</div><div class="t">No conversations yet — message a friend from their profile.</div></div>`;
+  } catch (err) {
+    el.innerHTML = `<div class="empty-state"><div class="e">⚠️</div><div class="t">Couldn't load chats right now.</div></div>`;
+    handleApiError(err);
+  }
+}
+
+function updateChatBadge(conversations){
+  const dot = document.getElementById('chatBadgeDot');
+  if (!dot) return;
+  dot.hidden = !conversations.some(c => c.unread_count > 0);
+}
+
+function dmMsgHtml(m){
+  const mine = session.user && m.sender_id === session.user.id;
+  return `<div class="chat-msg"${mine ? ' style="flex-direction:row-reverse;"' : ''}>
+    <div class="a" style="background:${avColor(m.sender_id)}30; color:${avColor(m.sender_id)}">${mine ? 'Me' : '\u{1F464}'}</div>
+    <div class="b">${escapeHtml(m.body)}</div>
+  </div>`;
+}
+
+async function openDmThread(friendUserId, displayName){
+  if (blockedInDemo()) return;
+  currentDmFriendId = friendUserId;
+  const cached = conversationsCache.find(c => c.friend_user_id === friendUserId);
+  document.getElementById('dmThreadTitle').textContent = displayName || (cached && cached.display_name) || 'Chat';
+  document.getElementById('dmThreadMessages').innerHTML = `<div class="empty-mini">Loading…</div>`;
+  openSheet('sheetDmThread');
+  try {
+    const messages = await ChatApi.getMessages(friendUserId);
+    renderDmMessages(messages);
+    connectDmSocket(friendUserId);
+    renderChatList(); // opening a thread marks it read server-side — refresh the list/badge to match
+  } catch (err) {
+    document.getElementById('dmThreadMessages').innerHTML = `<div class="empty-state"><div class="e">⚠️</div><div class="t">Couldn't open this conversation.</div></div>`;
+    handleApiError(err);
+  }
+}
+function renderDmMessages(messages){
+  const el = document.getElementById('dmThreadMessages');
+  if (!el) return;
+  el.innerHTML = messages.length ? messages.map(dmMsgHtml).join('') : `<div class="empty-mini">No messages yet — say hi.</div>`;
+  el.scrollTop = el.scrollHeight;
+}
+async function connectDmSocket(friendUserId){
+  if (dmSocket) { dmSocket.close(); dmSocket = null; }
+  try {
+    dmSocket = await ChatApi.openDmSocket(friendUserId, {
+      onMessage: (msg) => {
+        if (currentDmFriendId !== friendUserId) return;
+        const el = document.getElementById('dmThreadMessages');
+        if (el) { el.innerHTML += dmMsgHtml(msg); el.scrollTop = el.scrollHeight; }
+      },
+    });
+  } catch (err) { console.error(err); }
+}
+function closeDmThread(){
+  if (dmSocket) { dmSocket.close(); dmSocket = null; }
+  currentDmFriendId = null;
+  closeAllSheets();
+}
+async function sendDmMessage(){
+  if (blockedInDemo()) return;
+  const friendUserId = currentDmFriendId;
+  if (!friendUserId) return;
+  const inp = document.getElementById('dmMessageInput');
+  const val = inp.value.trim();
+  if (!val) return;
+  inp.value = '';
+  try {
+    const msg = await ChatApi.sendMessage(friendUserId, val);
+    const el = document.getElementById('dmThreadMessages');
+    if (el) { el.innerHTML += dmMsgHtml(msg); el.scrollTop = el.scrollHeight; }
+  } catch (err) { handleApiError(err, "Couldn't send that message"); inp.value = val; }
+}
+
+/* ============================================================
    PROFILE
    ============================================================ */
 async function renderProfile(){
@@ -889,6 +1053,176 @@ async function renderProfile(){
       avEl.textContent = initials(session.user.display_name);
     }
   }
+  const interestsEl = document.getElementById('profileInterestsRow');
+  if (interestsEl) {
+    interestsEl.innerHTML = myInterests.length
+      ? myInterests.map(i => `<span>${escapeHtml(i)}</span>`).join('')
+      : `<span style="opacity:0.6;">No interests added yet</span>`;
+  }
+  const verifyEl = document.getElementById('verifyBanner');
+  if (verifyEl) {
+    // Only meaningfully actionable once a mail provider is configured
+    // and REQUIRE_EMAIL_VERIFICATION is on (see backend/app/config.py)
+    // — until then this is just an informational nudge, never a block.
+    verifyEl.innerHTML = (session.user.email_verified === false) ? `
+      <div class="verify-banner">
+        <div class="t">📧 Verify your email</div>
+        <div class="s">Check your inbox for a verification link, or resend one below.</div>
+        <button onclick="AroundApp.resendVerificationEmail(this)">Resend verification email</button>
+      </div>` : '';
+  }
+}
+
+async function resendVerificationEmail(btn){
+  await withBusy(btn, async () => {
+    try {
+      const res = await AuthApi.resendVerification();
+      toast(res.status === 'already_verified' ? "You're already verified" : 'Verification email sent — check your inbox');
+    } catch (err) { handleApiError(err, "Couldn't send that right now"); }
+  });
+}
+
+/* ============================================================
+   FRIENDS LIST (Profile → Friends)
+
+   No existing privacy setting governs who can see a friend list (the
+   only privacy toggles are hide_from_nearby and restrict_messages —
+   neither covers this), so the least-invasive default is chosen here:
+   a user's OWN friend list is visible only to themselves (this sheet
+   is only ever opened from your own Profile tab — there's no "view
+   someone else's friend list" entry point anywhere in the UI, which is
+   the safer default until a real privacy setting exists for it).
+   ============================================================ */
+async function openFriendsList(){
+  document.getElementById('friendsListContent').innerHTML = `<div class="empty-mini" style="padding:20px;">Loading…</div>`;
+  openSheet('sheetFriendsList');
+  try {
+    const friends = await FriendsApi.listFriends();
+    const el = document.getElementById('friendsListContent');
+    el.innerHTML = friends.length ? friends.map(f => {
+      const avatar = f.avatar_url
+        ? `<img src="${MediaApi.absoluteMediaUrl(f.avatar_url)}" alt=""/>`
+        : escapeHtml(initials(f.display_name));
+      return `<div class="conversation-item" data-friend-id="${f.user_id}" onclick="AroundApp.closeAllSheets(); AroundApp.openUserProfile(this.dataset.friendId);">
+        <div class="cav" style="background:${avColor(f.display_name)}30; color:${avColor(f.display_name)}">${avatar}</div>
+        <div class="cbody"><div class="cname">${escapeHtml(f.display_name)}</div></div>
+      </div>`;
+    }).join('') : `<div class="empty-state"><div class="e">👥</div><div class="t">No friends yet — add friends from their profile.</div></div>`;
+  } catch (err) {
+    document.getElementById('friendsListContent').innerHTML = `<div class="empty-state"><div class="e">⚠️</div><div class="t">Couldn't load friends right now.</div></div>`;
+    handleApiError(err);
+  }
+}
+
+/* ============================================================
+   EDIT PROFILE (avatar, nickname, bio, university, interests)
+
+   All fields go through the existing PATCH /users/me — no new profile
+   endpoint. Backend-side moderation (nickname/bio) and the curated
+   interest catalog are enforced server-side regardless of what this UI
+   allows through, per spec — this form just gives the user a clear
+   error instead of a raw 400 when that happens.
+   ============================================================ */
+let editProfileDraft = { interests: [] };
+let interestCatalogCache = null;
+
+async function openEditProfile(){
+  if (!interestCatalogCache) {
+    try { interestCatalogCache = (await UsersApi.getInterestCatalog()).groups; }
+    catch (err) { interestCatalogCache = {}; }
+  }
+  editProfileDraft = {
+    display_name: session.user.display_name || '',
+    bio: session.user.bio || '',
+    university_or_work: session.user.university_or_work || '',
+    interests: [...myInterests],
+  };
+  renderEditProfile();
+  openSheet('sheetEditProfile');
+}
+
+function renderEditProfile(){
+  const d = editProfileDraft;
+  const avatar = session.user.avatar_url
+    ? `<img src="${MediaApi.absoluteMediaUrl(session.user.avatar_url)}" alt=""/>`
+    : escapeHtml(initials(d.display_name));
+  document.getElementById('editProfileContent').innerHTML = `
+    <div style="text-align:center;">
+      <div class="avatar-upload-wrap">
+        <div class="profile-avatar">${avatar}</div>
+        <button class="avatar-edit-btn-lg" onclick="document.getElementById('editAvatarFileInput').click()">✏️</button>
+        <input type="file" id="editAvatarFileInput" accept="image/jpeg,image/png,image/webp,image/gif" style="display:none;" onchange="AroundApp.handleAvatarFileChosen(this)"/>
+      </div>
+    </div>
+    <div class="field-label">Nickname</div>
+    <input class="text-input" id="editNickname" maxlength="40" value="${escapeHtml(d.display_name)}"/>
+    <div class="field-label">University / work</div>
+    <input class="text-input" id="editUniversity" maxlength="100" value="${escapeHtml(d.university_or_work)}"/>
+    <div class="field-label">Bio</div>
+    <textarea class="textarea-input" id="editBio" maxlength="280">${escapeHtml(d.bio)}</textarea>
+    <div class="field-label">Interests</div>
+    <div class="selected-interests" id="selectedInterestsRow">${renderSelectedInterestChips()}</div>
+    <input class="text-input" id="interestSearch" placeholder="Search interests…" style="margin-top:10px;" oninput="AroundApp.filterInterestPicker(this.value)"/>
+    <div id="interestPickerGroups" style="margin-top:6px;">${renderInterestPickerGroups('')}</div>
+    <button class="next-btn" id="saveProfileBtn" onclick="AroundApp.saveEditProfile(this)">Save changes</button>
+  `;
+}
+
+function renderSelectedInterestChips(){
+  if (!editProfileDraft.interests.length) return `<span style="font-size:12px; color:var(--text-faint);">None selected yet</span>`;
+  return editProfileDraft.interests.map(i => `
+    <div class="rm-chip">${escapeHtml(i)}<button onclick="AroundApp.toggleInterest('${escapeHtml(i).replace(/"/g,'&quot;')}')">✕</button></div>
+  `).join('');
+}
+
+function renderInterestPickerGroups(filter){
+  const groups = interestCatalogCache || {};
+  const q = filter.trim().toLowerCase();
+  return Object.entries(groups).map(([group, items]) => {
+    const visible = items.filter(i => !q || i.toLowerCase().includes(q));
+    if (!visible.length) return '';
+    return `
+      <div class="interest-group-label">${escapeHtml(group)}</div>
+      <div class="interest-picker-grid">
+        ${visible.map(i => `<button class="interest-opt ${editProfileDraft.interests.includes(i)?'selected':''}" onclick="AroundApp.toggleInterest('${escapeHtml(i).replace(/"/g,'&quot;')}')">${escapeHtml(i)}</button>`).join('')}
+      </div>`;
+  }).join('');
+}
+
+function filterInterestPicker(value){
+  document.getElementById('interestPickerGroups').innerHTML = renderInterestPickerGroups(value);
+}
+
+function toggleInterest(interest){
+  const idx = editProfileDraft.interests.indexOf(interest);
+  if (idx === -1) editProfileDraft.interests.push(interest);
+  else editProfileDraft.interests.splice(idx, 1);
+  document.getElementById('selectedInterestsRow').innerHTML = renderSelectedInterestChips();
+  const search = document.getElementById('interestSearch');
+  document.getElementById('interestPickerGroups').innerHTML = renderInterestPickerGroups(search ? search.value : '');
+}
+
+async function saveEditProfile(btn){
+  if (blockedInDemo()) return;
+  await withBusy(btn, async () => {
+    const displayName = document.getElementById('editNickname').value.trim();
+    const university = document.getElementById('editUniversity').value.trim();
+    const bio = document.getElementById('editBio').value.trim();
+    if (displayName.length < 2) { toast('Nickname is too short'); return; }
+    try {
+      const updated = await UsersApi.updateMyProfile({
+        display_name: displayName,
+        university_or_work: university || null,
+        bio: bio || null,
+        interests: editProfileDraft.interests,
+      });
+      session.user = { ...session.user, ...updated };
+      myInterests = [...editProfileDraft.interests];
+      renderProfile();
+      closeAllSheets();
+      toast('Profile updated');
+    } catch (err) { handleApiError(err, "Couldn't save your profile"); }
+  });
 }
 
 function escapeHtml(value){
@@ -911,7 +1245,7 @@ async function openUserProfile(userId, sourceEventId){
         <div class="profile-name">${escapeHtml(profile.display_name)}</div>
         <div class="profile-loc">${profile.university_or_work ? escapeHtml(profile.university_or_work) : ''}</div>
         ${profile.bio ? `<div class="ed-desc">${escapeHtml(profile.bio)}</div>` : ''}
-        ${renderFriendAction(profile.friendship_status, userId)}
+        ${renderFriendAction(profile.friendship_status, userId, profile.display_name)}
         ${isSelf ? '' : `<button class="block-user-link" onclick="AroundApp.blockUserAction('${userId}')">🚫 Block user</button>`}
       </div>`;
   } catch (err) {
@@ -951,9 +1285,13 @@ async function blockUserAction(userId){
  * friendship system. Blocked users never reach this code at all:
  * GET /users/{id} 404s for them before friendship_status is computed.
  */
-function renderFriendAction(status, userId){
+function renderFriendAction(status, userId, displayName){
   if (status === 'self' || !userId) return '';
-  if (status === 'accepted') return `<div class="friend-status-pill">✓ Friends</div>`;
+  if (status === 'accepted') return `
+    <div class="friend-action-row">
+      <div class="friend-status-pill" style="flex:1;">✓ Friends</div>
+      <button class="next-btn" style="flex:1; margin-top:0;" data-name="${escapeHtml(displayName || '')}" onclick="AroundApp.openDmThread('${userId}', this.dataset.name)">💬 Message</button>
+    </div>`;
   if (status === 'pending_sent') return `<div class="friend-status-pill">Request sent</div>`;
   if (status === 'pending_received') return `
     <div class="friend-action-row">
@@ -1587,6 +1925,7 @@ function closeAllSheets(){
   document.querySelectorAll('.sheet').forEach(s=>s.classList.remove('show'));
   state.activeSheet=null;
   if (chatSocket) { chatSocket.close(); chatSocket = null; }
+  if (dmSocket) { dmSocket.close(); dmSocket = null; currentDmFriendId = null; }
 }
 
 /* ============================================================
@@ -1982,6 +2321,9 @@ window.AroundApp = {
   joinEventFlow, leaveEventFlow, requestToJoinFlow, cancelRequestFlow, redeemInviteCode,
   joinWaitlist, leaveWaitlist, claimWaitlistOffer,
   inviteGuestSubmit, cancelMyGuest, sendChat, selfCheckIn, openQrScanner, closeQrScanner,
+  resendVerificationEmail,
+  openFriendsList, openEditProfile, toggleInterest, filterInterestPicker, saveEditProfile,
+  openDmThread, closeDmThread, sendDmMessage,
 };
 // legacy onclick="renderDiscoverResults()"-style calls in the static
 // markup reference a couple of functions directly for readability —

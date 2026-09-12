@@ -36,6 +36,16 @@ export async function reportProblem(message) {
   return apiClient.post("/users/me/report-problem", { message });
 }
 
+/** @returns {Promise<{groups: Record<string,string[]>}>} the curated interest catalog, grouped for a picker UI */
+export async function getInterestCatalog() {
+  return apiClient.get("/users/interests");
+}
+
+/** @returns {Promise<{interests: string[]}>} the current user's own selected interests */
+export async function getMyInterests() {
+  return apiClient.get("/users/me/interests");
+}
+
 // ---------- I'm Free ----------
 // Preserves the expiry model from the backend README: statuses always
 // carry expires_at server-side and reads filter on it, so a stale status

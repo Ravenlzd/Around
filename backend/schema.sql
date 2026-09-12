@@ -45,6 +45,10 @@ CREATE TABLE users (
     last_location       GEOGRAPHY(POINT, 4326),
     last_location_at    TIMESTAMPTZ,
     status              TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','suspended','deleted')),
+    -- New signups start unverified; a fresh local database has no
+    -- pre-existing users to backfill, unlike migrations/0003 in
+    -- production, so the plain column default is correct here.
+    email_verified      BOOLEAN NOT NULL DEFAULT false,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -301,6 +305,23 @@ CREATE TABLE direct_messages (
     read_at     TIMESTAMPTZ
 );
 CREATE INDEX idx_dm_thread ON direct_messages(least(sender_id::text, recipient_id::text), greatest(sender_id::text, recipient_id::text), created_at);
+
+-- ---------- Email verification ----------
+-- Added by migrations/0003 in an already-deployed database (with
+-- existing users backfilled to email_verified=true — see that
+-- migration's docstring); included here too so a brand new local
+-- database matches. Nothing reads/writes this table until a mail
+-- provider is configured and app/config.py's REQUIRE_EMAIL_VERIFICATION
+-- is turned on.
+CREATE TABLE email_verification_tokens (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id     UUID REFERENCES users(id) NOT NULL,
+    token_hash  TEXT NOT NULL UNIQUE,
+    expires_at  TIMESTAMPTZ NOT NULL,
+    used_at     TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_email_verification_user ON email_verification_tokens(user_id);
 
 -- ---------- Reports / moderation ----------
 CREATE TABLE reports (

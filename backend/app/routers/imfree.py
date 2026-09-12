@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models import Block, ImFreeStatus, User
 from app.schemas import ImFreeCreate
-from app.deps import get_current_user
+from app.deps import get_current_user, require_verified_user
 
 router = APIRouter()
 
@@ -28,7 +28,7 @@ WINDOW_TTL = {
 
 
 @router.post("")
-async def activate(payload: ImFreeCreate, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def activate(payload: ImFreeCreate, user: User = Depends(require_verified_user), db: AsyncSession = Depends(get_db)):
     await db.execute(delete(ImFreeStatus).where(ImFreeStatus.user_id == user.id))
     status_row = ImFreeStatus(
         user_id=user.id,

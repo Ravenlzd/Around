@@ -14,7 +14,9 @@ from sqlalchemy import select, delete, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from app.interests import INTEREST_GROUPS, INTERESTS
 from app.models import Block, Event, EventParticipant, Friendship, Report, User, UserInterest, UserStats
+from app.moderation import is_inappropriate
 from app.schemas import PublicUserOut, ReportProblemCreate, UserOut, ProfileUpdate
 from app.deps import get_current_user
 from app.trust import derive_trust_state
@@ -28,15 +30,39 @@ async def get_my_profile(user: User = Depends(get_current_user)):
     return user
 
 
+@router.get("/interests")
+async def list_interest_catalog():
+    """
+    The curated, selectable interest vocabulary (app/interests.py) —
+    grouped for the frontend's picker UI. Not auth-gated: it's static,
+    non-personal reference data, same category as a list of event
+    categories would be.
+    """
+    return {"groups": INTEREST_GROUPS}
+
+
 @router.patch("/me", response_model=UserOut)
 async def update_my_profile(payload: ProfileUpdate, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     data = payload.model_dump(exclude_unset=True, exclude={"interests"})
+
+    # Nickname: also check the de-spaced variant (a single-token field —
+    # see moderation.py's docstring for why that's safe here but not for
+    # a bio). Bio: free text, no de-spacing, to avoid false positives
+    # across word boundaries.
+    if "display_name" in data and is_inappropriate(data["display_name"], despace=True):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Please choose a different nickname")
+    if "bio" in data and is_inappropriate(data["bio"]):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Please remove inappropriate language from your bio")
+
     for field, value in data.items():
         setattr(user, field, value)
 
     if payload.interests is not None:
+        unknown = set(payload.interests) - INTERESTS
+        if unknown:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unknown interest(s): {', '.join(sorted(unknown))}")
         await db.execute(delete(UserInterest).where(UserInterest.user_id == user.id))
-        for interest in payload.interests:
+        for interest in set(payload.interests):
             db.add(UserInterest(user_id=user.id, interest=interest))
 
     await db.commit()
