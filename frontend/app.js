@@ -577,7 +577,7 @@ function ensureLeafletMap(){
   if (!container) return null;
 
   leafletMap = L.map(container, { zoomControl: true, attributionControl: true }).setView([geo.lat, geo.lng], 14);
-  const tileUrl = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png' + (CARTO_API_KEY ? `key=${encodeURIComponent(CARTO_API_KEY)}` : '');
+  const tileUrl = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png' + (CARTO_API_KEY ? `?api_key=${encodeURIComponent(CARTO_API_KEY)}` : '');
   L.tileLayer(tileUrl, {
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
     subdomains: 'abcd', maxZoom: 19,

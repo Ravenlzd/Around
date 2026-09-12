@@ -23,6 +23,19 @@ export async function getPublicProfile(userId) {
   return apiClient.get(`/users/${encodeURIComponent(userId)}`);
 }
 
+export async function blockUser(userId) {
+  return apiClient.post(`/users/${encodeURIComponent(userId)}/block`, {});
+}
+
+export async function unblockUser(userId) {
+  return apiClient.delete(`/users/${encodeURIComponent(userId)}/block`);
+}
+
+/** @param {string} message */
+export async function reportProblem(message) {
+  return apiClient.post("/users/me/report-problem", { message });
+}
+
 // ---------- I'm Free ----------
 // Preserves the expiry model from the backend README: statuses always
 // carry expires_at server-side and reads filter on it, so a stale status

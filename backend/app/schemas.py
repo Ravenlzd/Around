@@ -56,6 +56,10 @@ class PublicUserOut(BaseModel):
         from_attributes = True
 
 
+class ReportProblemCreate(BaseModel):
+    message: str = Field(min_length=1, max_length=1000)
+
+
 class ProfileUpdate(BaseModel):
     display_name: str | None = None
     university_or_work: str | None = None

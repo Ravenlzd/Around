@@ -6,6 +6,7 @@ concern, already partly covered by app/routers/discovery.py's people
 cards, and left for a future phase rather than expanded here per the
 "no new major features" scope boundary for this integration pass).
 """
+import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -13,8 +14,8 @@ from sqlalchemy import select, delete, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models import Block, Event, EventParticipant, Friendship, User, UserInterest, UserStats
-from app.schemas import PublicUserOut, UserOut, ProfileUpdate
+from app.models import Block, Event, EventParticipant, Friendship, Report, User, UserInterest, UserStats
+from app.schemas import PublicUserOut, ReportProblemCreate, UserOut, ProfileUpdate
 from app.deps import get_current_user
 from app.trust import derive_trust_state
 from app.routers.friends import ordered_pair
@@ -95,7 +96,6 @@ async def get_public_profile(
 ):
     """Read a limited member profile without exposing private account or location data."""
     try:
-        import uuid
         profile_id = uuid.UUID(user_id)
     except ValueError:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
@@ -136,3 +136,67 @@ async def get_public_profile(
         "avatar_url": profile.avatar_url,
         "friendship_status": friendship_status,
     }
+
+
+@router.post("/{user_id}/block", status_code=status.HTTP_201_CREATED)
+async def block_user(user_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """
+    Was previously a visual-only "Blocked users" row with nothing behind
+    it — the Block model and every read-side exclusion query (discovery
+    people-nearby, I'm Free nearby, get_public_profile above) already
+    existed and already filter on it, but nothing ever wrote a row.
+    This is that missing write path, not a new blocking system.
+    """
+    try:
+        target_id = uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    if target_id == user.id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Can't block yourself")
+    target = await db.get(User, target_id)
+    if not target:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+
+    existing = await db.get(Block, {"blocker_id": user.id, "blocked_id": target_id})
+    if not existing:
+        db.add(Block(blocker_id=user.id, blocked_id=target_id))
+        # A block always wins over a friendship — mirrors friends.py's
+        # send_request() refusing new requests once a block exists, so a
+        # block can't leave a stale pending/accepted friendship row a
+        # user would otherwise see reflected as "Friends" or "Pending".
+        a, b = ordered_pair(user.id, target_id)
+        friendship = await db.get(Friendship, {"user_id_a": a, "user_id_b": b})
+        if friendship:
+            await db.delete(friendship)
+        await db.commit()
+    return {"status": "blocked"}
+
+
+@router.delete("/{user_id}/block")
+async def unblock_user(user_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    try:
+        target_id = uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    existing = await db.get(Block, {"blocker_id": user.id, "blocked_id": target_id})
+    if existing:
+        await db.delete(existing)
+        await db.commit()
+    return {"status": "unblocked"}
+
+
+@router.post("/me/report-problem", status_code=status.HTTP_201_CREATED)
+async def report_problem(payload: ReportProblemCreate, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """
+    Profile settings' "Report a problem" — previously a static toast
+    with no backend behind it at all. Reuses the existing general-
+    purpose Report model (already used by events.py's per-event report
+    endpoint) rather than introducing a second reporting mechanism.
+    target_type='app' with target_id=the reporter's own id is a
+    sentinel (Report.target_id is NOT NULL and this report isn't about
+    any specific user/event/post) rather than a claim the user reported
+    themselves.
+    """
+    db.add(Report(reporter_id=user.id, target_type="app", target_id=user.id, reason="user_reported_problem", details=payload.message))
+    await db.commit()
+    return {"status": "submitted"}
