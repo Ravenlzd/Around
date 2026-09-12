@@ -7,8 +7,9 @@ queries also always filter `expires_at > now()` as a second guard.
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends
-from geoalchemy2.functions import ST_MakePoint, ST_SetSRID, ST_DistanceSphere
-from sqlalchemy import select, delete, or_
+from geoalchemy2 import Geography
+from geoalchemy2.functions import ST_MakePoint, ST_SetSRID, ST_Distance
+from sqlalchemy import cast, select, delete, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -64,8 +65,17 @@ async def nearby_free_people(
         excluded_ids.add(block.blocker_id)
         excluded_ids.add(block.blocked_id)
 
-    user_point = ST_SetSRID(ST_MakePoint(lng, lat), 4326)
-    distance_expr = (ST_DistanceSphere(ImFreeStatus.location, user_point) / 1000).label("distance_km")
+    # ImFreeStatus.location is a geography column (schema.sql:
+    # GEOGRAPHY(POINT, 4326)) — ST_DistanceSphere only has a
+    # geometry-geometry signature, so calling it with a geography column
+    # and a bare geometry point (as this did previously) fails in
+    # production with `UndefinedFunctionError: function
+    # st_distancesphere(geography, geometry) does not exist` (confirmed
+    # from Render logs; it never worked). ST_Distance on two geography
+    # values returns geodesic meters directly — see the identical,
+    # already-working pattern in discovery.py's nearby().
+    user_point = cast(ST_SetSRID(ST_MakePoint(lng, lat), 4326), Geography)
+    distance_expr = (ST_Distance(ImFreeStatus.location, user_point) / 1000).label("distance_km")
     stmt = (
         select(ImFreeStatus, distance_expr)
         .join(User, User.id == ImFreeStatus.user_id)

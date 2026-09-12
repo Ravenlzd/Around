@@ -6,8 +6,9 @@ carries an expires_at set at creation from the caller-chosen TTL.
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends
-from geoalchemy2.functions import ST_MakePoint, ST_SetSRID, ST_DistanceSphere
-from sqlalchemy import select
+from geoalchemy2 import Geography
+from geoalchemy2.functions import ST_MakePoint, ST_SetSRID, ST_Distance
+from sqlalchemy import cast, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -34,8 +35,17 @@ async def create_post(payload: SpontaneousPostCreate, user: User = Depends(get_c
 
 @router.get("/nearby")
 async def nearby_posts(lat: float, lng: float, radius_km: float = 5, db: AsyncSession = Depends(get_db)):
-    user_point = ST_SetSRID(ST_MakePoint(lng, lat), 4326)
-    distance_m = ST_DistanceSphere(SpontaneousPost.location, user_point)
+    # SpontaneousPost.location is a geography column (schema.sql:
+    # GEOGRAPHY(POINT, 4326)) — ST_DistanceSphere only has a
+    # geometry-geometry signature, so calling it with a geography column
+    # and a bare geometry point (as this did previously) fails in
+    # production with `UndefinedFunctionError: function
+    # st_distancesphere(geography, geometry) does not exist` (it never
+    # worked; the analogous /discovery/nearby query already used the
+    # correct pattern below). ST_Distance on two geography values returns
+    # geodesic meters directly and needs no separate "sphere" variant.
+    user_point = cast(ST_SetSRID(ST_MakePoint(lng, lat), 4326), Geography)
+    distance_m = ST_Distance(SpontaneousPost.location, user_point)
     stmt = (
         select(SpontaneousPost, (distance_m / 1000).label("distance_km"))
         .where(
