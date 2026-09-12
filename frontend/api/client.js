@@ -134,6 +134,32 @@ export class ApiError extends Error {
 }
 
 /**
+ * One retry, after a short delay, for a genuine fetch()-level failure
+ * (DNS, connection refused, a dropped connection) only — never for an
+ * HTTP error response, which fetch() resolves normally rather than
+ * rejecting. This is aimed at exactly the class of failure users have
+ * reported as "Can't reach the server" that a live server-side check
+ * couldn't reproduce: a transient blip, or the first request landing
+ * while a backend instance is still coming up, both of which a second
+ * attempt a moment later commonly clears on its own. A hard failure
+ * (backend genuinely down, request truly blocked) still fails the same
+ * way, just ~1.5s later — the retry can only help, never make a real
+ * failure worse.
+ */
+async function fetchWithOneRetry(url, fetchOpts) {
+  try {
+    return await fetch(url, fetchOpts);
+  } catch (firstErr) {
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    try {
+      return await fetch(url, fetchOpts);
+    } catch (secondErr) {
+      throw secondErr;
+    }
+  }
+}
+
+/**
  * @param {string} path - e.g. "/events/123/join"
  * @param {{method?: string, body?: any, auth?: boolean, query?: Record<string,any>}} [opts]
  */
@@ -155,17 +181,26 @@ async function request(path, opts = {}) {
     if (token) headers["Authorization"] = `Bearer ${token}`;
   }
 
+  const fetchOpts = {
+    method,
+    headers,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  };
+
   let res;
   try {
-    res = await fetch(url, {
-      method,
-      headers,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
+    res = await fetchWithOneRetry(url, fetchOpts);
   } catch (networkErr) {
-    // fetch() throws on DNS failure, connection refused, CORS block, etc.
-    // — this is the "backend unavailable" case from spec §21.
-    throw new ApiError("Can't reach Around's server. Check your connection and try again.", 0, null);
+    // fetch() throws on DNS failure, connection refused, CORS block, a
+    // dropped connection mid-request, etc. — this is the "backend
+    // unavailable" case from spec §21. The real browser-level reason
+    // (e.g. "Failed to fetch", a specific CORS violation message, or a
+    // timeout) was previously discarded here entirely — logging it is
+    // the difference between "can't reach the server" being the whole
+    // story and it being a starting point for actually diagnosing a
+    // report of this happening in production.
+    console.error(`[Around] network-level failure calling ${method} ${path}:`, networkErr);
+    throw new ApiError("Can't reach Around's server. Check your connection and try again.", 0, networkErr && networkErr.message);
   }
 
   let data = null;
