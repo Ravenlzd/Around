@@ -577,7 +577,7 @@ function ensureLeafletMap(){
   if (!container) return null;
 
   leafletMap = L.map(container, { zoomControl: true, attributionControl: true }).setView([geo.lat, geo.lng], 14);
-  const tileUrl = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png' + (CARTO_API_KEY ? `?api_key=${encodeURIComponent(CARTO_API_KEY)}` : '');
+  const tileUrl = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png' + (CARTO_API_KEY ? `?key=${encodeURIComponent(CARTO_API_KEY)}` : '');
   L.tileLayer(tileUrl, {
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
     subdomains: 'abcd', maxZoom: 19,
@@ -707,13 +707,18 @@ async function renderPeopleNearby(){
   el.innerHTML = `<div class="empty-mini">Loading\u2026</div>`;
   try {
     const people = await EventsApi.peopleNearby();
-    el.innerHTML = people.length ? people.map(p => `
-      <div class="person-card">
-        <div class="pav" style="background:${avColor(p.display_name)}30; color:${avColor(p.display_name)}">${initials(p.display_name)}</div>
-        <div class="pname">${p.display_name}</div>
-        <div class="pmeta">${p.shared_interests.length ? p.shared_interests.slice(0,2).join(' \u00b7 ') : (p.university_or_work || 'Around member')}</div>
+    el.innerHTML = people.length ? people.map(p => {
+      const avatar = p.avatar_url
+        ? `<img src="${MediaApi.absoluteMediaUrl(p.avatar_url)}" alt="" onerror="this.replaceWith(Object.assign(document.createElement('span'),{textContent:'${escapeHtml(initials(p.display_name))}'}))"/>`
+        : escapeHtml(initials(p.display_name));
+      return `
+      <div class="person-card" onclick="AroundApp.openUserProfile('${p.user_id}')">
+        <div class="pav" style="background:${avColor(p.display_name)}30; color:${avColor(p.display_name)}">${avatar}</div>
+        <div class="pname">${escapeHtml(p.display_name)}</div>
+        <div class="pmeta">${p.shared_interests.length ? escapeHtml(p.shared_interests.slice(0,2).join(' \u00b7 ')) : escapeHtml(p.university_or_work || 'Around member')}</div>
         <div class="pshared">${p.mutual_events ? p.mutual_events + ' mutual event' + (p.mutual_events>1?'s':'') : p.shared_interests.length + ' shared interest' + (p.shared_interests.length!==1?'s':'')}${p.friendship_status==='accepted'?' \u00b7 Friends':p.friendship_status==='pending'?' \u00b7 Pending':''}</div>
-      </div>`).join('')
+      </div>`;
+    }).join('')
       : `<div class="empty-mini">No one to show yet — add some interests in your profile or join a few events to find people with things in common.</div>`;
   } catch (err) {
     el.innerHTML = `<div class="empty-mini">Couldn't load people right now.</div>`;
@@ -1873,11 +1878,17 @@ function renderFree(){
     </div>
     <div class="section-label" style="padding-left:0; margin-top:20px;">People free near you</div>
     <div style="display:flex; flex-direction:column; gap:8px; margin-top:6px;">
-      ${imFreeNearbyLoading ? `<div class="empty-mini">Finding people who are free…</div>` : imFreeNearby.length ? imFreeNearby.map(p=>`<div class="event-card" style="cursor:default;">
-          <div class="emoji-box" style="background:${avColor(p.user_id)}30; color:${avColor(p.user_id)}; font-weight:800;">?</div>
-          <div class="body"><div class="title">Someone is free ${(p.when||'').replace('_',' ')}</div>
+      ${imFreeNearbyLoading ? `<div class="empty-mini">Finding people who are free…</div>` : imFreeNearby.length ? imFreeNearby.map(p=>{
+          const avatar = p.avatar_url
+            ? `<img src="${MediaApi.absoluteMediaUrl(p.avatar_url)}" alt="" style="width:100%; height:100%; object-fit:cover; border-radius:14px;"/>`
+            : '?';
+          const name = p.display_name ? escapeHtml(p.display_name) : 'Someone';
+          return `<div class="event-card" onclick="AroundApp.closeAllSheets(); AroundApp.openUserProfile('${p.user_id}')">
+          <div class="emoji-box" style="background:${avColor(p.user_id)}30; color:${avColor(p.user_id)}; font-weight:800; overflow:hidden;">${avatar}</div>
+          <div class="body"><div class="title">${name} \u00b7 free ${(p.when||'').replace('_',' ')}</div>
           <div class="meta">Looking for <b style="color:var(--accent)">${p.looking_for}</b> \u00b7 ${p.distance_km}km away</div></div>
-        </div>`).join('') : imFreeNearbyError ? `<div class="empty-mini">Couldn't load people who are free right now.</div>` : `<div class="empty-mini">No one eligible is free nearby right now. People appear here only after another visible member in your city turns on I'm Free.</div>`}
+        </div>`;
+        }).join('') : imFreeNearbyError ? `<div class="empty-mini">Couldn't load people who are free right now.</div>` : `<div class="empty-mini">No one eligible is free nearby right now. People appear here only after another visible member in your city turns on I'm Free.</div>`}
     </div>
     <button class="next-btn" onclick="AroundApp.activateFree(this)">Go free ${freeDraft.when.replace('_',' ')}</button>
   `;

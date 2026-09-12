@@ -77,7 +77,7 @@ async def nearby_free_people(
     user_point = cast(ST_SetSRID(ST_MakePoint(lng, lat), 4326), Geography)
     distance_expr = (ST_Distance(ImFreeStatus.location, user_point) / 1000).label("distance_km")
     stmt = (
-        select(ImFreeStatus, distance_expr)
+        select(ImFreeStatus, distance_expr, User.display_name, User.avatar_url)
         .join(User, User.id == ImFreeStatus.user_id)
         .where(
             ImFreeStatus.expires_at > datetime.now(timezone.utc),
@@ -91,7 +91,16 @@ async def nearby_free_people(
         .limit(30)
     )
     rows = (await db.execute(stmt)).all()
+    # display_name/avatar_url added so the frontend can show who this is
+    # and open their profile (the existing Add Friend / Block actions
+    # live there) — there's no separate direct-message feature in this
+    # app to wire up instead; the only messaging surface that exists at
+    # all is per-event chat (app/ws.py), which doesn't apply to two
+    # people who aren't sharing an event.
     return [
-        {"user_id": str(s.user_id), "when": s.when_window, "looking_for": s.looking_for, "distance_km": round(d, 1)}
-        for s, d in rows
+        {
+            "user_id": str(s.user_id), "display_name": name, "avatar_url": avatar_url,
+            "when": s.when_window, "looking_for": s.looking_for, "distance_km": round(d, 1),
+        }
+        for s, d, name, avatar_url in rows
     ]

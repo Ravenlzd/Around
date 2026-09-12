@@ -296,7 +296,19 @@ async def search(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    conditions = [Event.status == "active", or_(Event.access_mode != "private", Event.host_user_id == user.id)]
+    # There's no background job that ever moves a past event out of
+    # status='active' (expiry.py only sweeps waitlist offers, guest
+    # invitations, and ephemeral posts/I'm Free — never events), so
+    # status alone was letting every event that ever existed keep
+    # showing up here indefinitely. nearby() already filters on
+    # starts_at for exactly this reason; search() just wasn't doing the
+    # same, which is the actual bug — "expired events still appear in
+    # Discover" specifically meant *this* endpoint, not stale data.
+    conditions = [
+        Event.status == "active",
+        Event.starts_at > datetime.now(timezone.utc),
+        or_(Event.access_mode != "private", Event.host_user_id == user.id),
+    ]
     if q:
         conditions.append(Event.search_vector.match(q))
     if category:
