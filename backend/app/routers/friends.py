@@ -56,9 +56,19 @@ async def send_request(target_user_id: uuid.UUID, user: User = Depends(get_curre
 
     db.add(Friendship(user_id_a=a, user_id_b=b, status="pending", requested_by=user.id))
     await db.commit()
-    # notification: "X sent you a friend request" — see app/notify.py
+    # notification: "X sent you a friend request" — see app/notify.py.
+    # requester_id is what previously made this a dead end: the Activity
+    # screen had no way to know WHO to accept/decline without it (only a
+    # display name baked into a message string), so the only way to
+    # respond was going back to the sender's profile. list_notifications()
+    # in notifications.py uses this id to compute still_pending fresh on
+    # every read, which is also what makes Accept/Decline disappear
+    # correctly after being resolved from any entry point.
     from app.notify import notify
-    await notify(db, target_user_id, "friend_request", {"message": f"{user.display_name} sent you a friend request."})
+    await notify(db, target_user_id, "friend_request", {
+        "message": f"{user.display_name} sent you a friend request.",
+        "requester_id": str(user.id),
+    })
     return {"status": "requested"}
 
 

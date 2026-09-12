@@ -62,7 +62,19 @@ input,textarea{font-family:inherit; color:inherit; background:none; border:none;
   overflow:hidden;
   box-shadow:0 0 80px rgba(0,0,0,0.6);
 }
-.screen{ display:none; flex:1; flex-direction:column; min-height:0; }
+/* isolation:isolate gives each screen its own stacking context, so a
+   high z-index used *inside* one screen (e.g. .map-legend's z-index:500,
+   needed to sit above Leaflet's own map panes) can never leak above
+   content OUTSIDE that screen. Without this, neither #app nor .screen
+   nor .map-wrap established a stacking context (position:relative alone
+   doesn't, without a z-index too), so .map-legend's 500 was being
+   compared directly against .overlay/.sheet's 100/101 in the SAME
+   effective stacking context and winning — the actual cause of the map
+   category chips rendering on top of the create-event sheet. This is
+   the fix for that, not a bigger z-index on the sheet: the sheet's
+   z-index:101 was already "high enough," it just wasn't being compared
+   against 500 in a context where that comparison should ever happen. */
+.screen{ display:none; flex:1; flex-direction:column; min-height:0; isolation:isolate; }
 .screen.active{ display:flex; }
 
 /* ============ TOP BAR ============ */
@@ -235,7 +247,7 @@ input,textarea{font-family:inherit; color:inherit; background:none; border:none;
 
 .event-card{
   background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-md);
-  padding:14px; display:flex; gap:12px; cursor:pointer; position:relative; overflow:hidden;
+  padding:12px; display:flex; gap:12px; cursor:pointer; position:relative; overflow:hidden;
 }
 .event-card:active{ transform:scale(0.99); }
 .event-card .emoji-box{
@@ -315,6 +327,7 @@ input,textarea{font-family:inherit; color:inherit; background:none; border:none;
 .notif-item .ntime{ font-size:10.5px; color:var(--text-faint); font-family:var(--font-mono); margin-top:3px; }
 .notif-item.unread .ntxt{ color:var(--text); }
 .notif-item.unread .nicon{ background:rgba(200,255,62,0.14); }
+.notif-action-row{ display:flex; gap:8px; margin-top:8px; }
 
 /* ============ PROFILE ============ */
 .profile-hero{ padding:10px 20px 20px 20px; text-align:center; }

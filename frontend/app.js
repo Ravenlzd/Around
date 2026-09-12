@@ -764,8 +764,33 @@ function renderActivity(){
   const el=document.getElementById('activityList');
   el.innerHTML = notifications.length ? notifications.map(n=>`<div class="notif-item ${!n.read?'unread':''}" onclick="AroundApp.markNotifRead('${n.id}')">
       <div class="nicon">${notifIcon(n.type)}</div>
-      <div><div class="ntxt">${notifText(n)}</div><div class="ntime">${new Date(n.created_at).toLocaleString()}</div></div>
+      <div style="flex:1; min-width:0;">
+        <div class="ntxt">${notifText(n)}</div>
+        <div class="ntime">${new Date(n.created_at).toLocaleString()}</div>
+        ${isActionablePendingFriendRequest(n) ? `
+          <div class="notif-action-row" onclick="event.stopPropagation();">
+            <button class="mini-btn accept" onclick="AroundApp.respondFriendRequestFromNotif('${n.id}','${n.payload.requester_id}',true)">Accept</button>
+            <button class="mini-btn reject" onclick="AroundApp.respondFriendRequestFromNotif('${n.id}','${n.payload.requester_id}',false)">Decline</button>
+          </div>` : ''}
+      </div>
     </div>`).join('') : `<div class="empty-state"><div class="e">🔔</div><div class="t">Nothing yet — activity on your events will show up here.</div></div>`;
+}
+/**
+ * A friend_request notification is only actionable here if the backend
+ * says the underlying Friendship row is still 'pending' — see
+ * backend/app/routers/notifications.py's list_notifications(), which
+ * computes this fresh on every fetch from the same Friendship rows
+ * friends.py/events.py already treat as the source of truth. That's
+ * what makes this survive a refresh correctly: once the request has
+ * been accepted/declined (from here, or from the sender's profile
+ * sheet, or a second time from a stale tab), still_pending goes false
+ * and the buttons stop appearing — no separate "resolved" flag needed.
+ * Older notifications created before this field existed lack
+ * requester_id/still_pending entirely and correctly render with no
+ * action row (missing/falsy), rather than erroring.
+ */
+function isActionablePendingFriendRequest(n){
+  return n.type === 'friend_request' && n.payload && n.payload.requester_id && n.payload.still_pending;
 }
 function notifIcon(type){
   return {
@@ -781,6 +806,32 @@ function notifText(n){
 async function markNotifRead(id){
   try { await NotificationsApi.markRead(id); const n = notifications.find(x=>x.id===id); if(n) n.read = true; renderActivity(); }
   catch (err) { handleApiError(err); }
+}
+
+/**
+ * Accept/Decline straight from the Activity notification — reuses the
+ * exact same friends.py endpoints the profile sheet's Add Friend flow
+ * already calls (FriendsApi.acceptRequest/rejectRequest); this is not
+ * a second friendship system, just a second entry point into the same
+ * one, which is the actual gap this fixes (previously the only way to
+ * respond to a request was to go find the sender's profile again).
+ */
+async function respondFriendRequestFromNotif(notifId, requesterId, accept){
+  try {
+    if (accept) { await FriendsApi.acceptRequest(requesterId); toast('Friend request accepted'); }
+    else { await FriendsApi.rejectRequest(requesterId); toast('Request declined'); }
+  } catch (err) {
+    // A 404 here means the request was already accepted/declined
+    // elsewhere (e.g. the sender's profile sheet, or a second device) —
+    // friends.py's accept/reject endpoints 404 once the Friendship row
+    // is no longer 'pending'. The outcome the user wanted (this request
+    // no longer being pending) is already true, so treat it as success
+    // rather than an error.
+    if (err.status !== 404) { handleApiError(err); return; }
+  }
+  const n = notifications.find(x => x.id === notifId);
+  if (n && n.payload) n.payload.still_pending = false;
+  await markNotifRead(notifId);
 }
 
 /**
@@ -1910,7 +1961,7 @@ window.AroundApp = {
   setMapFilter, previewPin, closeMapPreview, openEvent, openUserProfile, closeUserProfile,
   sendFriendRequest, respondFriendRequest, blockUserAction, openReportProblem, submitReportProblem,
   setDiscoverCat, filterTonight, onSearchInput, loadMoreSearchResults,
-  markNotifRead, backFromActivity,
+  markNotifRead, backFromActivity, respondFriendRequestFromNotif,
   openManage, approveRequest, rejectRequest, toggleCheckIn, confirmDangerClick, toggleQR, refreshCheckinQr, copyCheckinToken,
   openSheet, closeAllSheets,
   openCreate, openEditEvent, pickCat, setDraftField, setDraftTime, stepCapacity, toggleAdvanced, createNext, createBack, publishEvent,
