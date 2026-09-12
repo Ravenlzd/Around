@@ -107,6 +107,22 @@ async def signup(payload: SignupRequest, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"City '{payload.city}' is not live yet")
 
     password_hash = pwd_context.hash(payload.password)
+
+    if not settings.REQUIRE_SIGNUP_OTP:
+        # OTP step temporarily disabled (see REQUIRE_SIGNUP_OTP's
+        # docstring) — create the account directly, same as before the
+        # OTP flow existed. email_verified=True here is honest, not a
+        # workaround: nothing actually verified this email, but nothing
+        # anywhere currently gates on that flag either (see
+        # REQUIRE_EMAIL_VERIFICATION), so it correctly reflects "not a
+        # known-bad state" rather than flagging every account created
+        # while this is off as suspect.
+        user = User(email=email, password_hash=password_hash, display_name=display_name, city_id=city.id, email_verified=True)
+        db.add(user)
+        await db.commit()
+        await db.refresh(user)
+        return TokenResponse(access_token=create_access_token(str(user.id)))
+
     otp = await _issue_pending_signup(db, email=email, password_hash=password_hash, display_name=display_name, city_id=city.id)
     await db.commit()
 

@@ -53,6 +53,18 @@ class Settings(BaseSettings):
     # of this flag — only the *gating* of other endpoints depends on it.
     # Flip to true once SMTP_* is configured and confirmed working.
     REQUIRE_EMAIL_VERIFICATION: bool = False
+    # Whether /auth/signup requires completing the OTP step (app/models.
+    # py's PendingSignup) before an account exists. Temporarily False —
+    # user request: "disable 2FA for now i will activate it later" —
+    # because with SMTP_HOST still unset, no one can complete the OTP
+    # step at all right now, which meant no one could sign up. The
+    # entire OTP flow (PendingSignup, /auth/verify-signup-otp,
+    # /auth/resend-signup-otp, the frontend's OTP screen) is untouched
+    # and still fully wired up; this flag only decides which branch
+    # /auth/signup takes. Set to true once SMTP_* is configured and
+    # you've confirmed a real OTP email arrives — signup will then
+    # immediately require it again, no other change needed.
+    REQUIRE_SIGNUP_OTP: bool = False
 
     class Config:
         env_file = ".env"

@@ -8,13 +8,21 @@ import { apiClient } from "./client.js";
  */
 
 /**
- * Starts signup — does NOT create an account or return a token. The
- * account only exists once verifySignupOtp() below succeeds; this just
- * gets a 6-digit code emailed. @returns {Promise<{status: string, email: string}>}
+ * Starts signup. Backend behavior depends on the server's own
+ * REQUIRE_SIGNUP_OTP setting (currently off — "disable 2FA for now"):
+ * - OTP required: returns {status:"otp_sent", email} — no account, no
+ *   token, yet. See verifySignupOtp() below for where it's created.
+ * - OTP disabled: creates the account immediately and returns a real
+ *   TokenResponse, same as signup worked before the OTP flow existed.
+ * Either shape can come back; the caller (app.js's submitAuth) checks
+ * for access_token to tell them apart rather than this file guessing.
  * @param {{email: string, password: string, display_name: string, city?: string}} payload
+ * @returns {Promise<{status: string, email: string} | TokenResponse>}
  */
 export async function register(payload) {
-  return apiClient.post("/auth/signup", { city: "Vilnius", ...payload }, { auth: false });
+  const res = await apiClient.post("/auth/signup", { city: "Vilnius", ...payload }, { auth: false });
+  if (res && res.access_token) await apiClient.tokens.set(res.access_token);
+  return res;
 }
 
 /**

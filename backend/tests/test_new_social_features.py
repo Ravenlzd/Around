@@ -293,6 +293,50 @@ class TestSignupOtp:
             assert await db.scalar(select(PendingSignup).where(PendingSignup.email == email)) is None
 
 
+class TestSignupOtpDisabled:
+    """
+    REQUIRE_SIGNUP_OTP currently defaults to False in production (user
+    request: "disable 2FA for now i will activate it later" — SMTP
+    isn't configured yet, so no one could otherwise complete signup at
+    all). CI forces it back on for the class above so the real OTP path
+    keeps getting exercised regardless of production's current default
+    (see .github/workflows/ci.yml) — this class covers the *other*
+    branch directly, with the setting patched off just for these tests,
+    so both codepaths in app/routers/auth.py's signup() have real
+    coverage rather than only whichever one CI's env happens to select.
+    """
+
+    @pytest.mark.asyncio
+    async def test_signup_creates_the_account_immediately_when_otp_is_disabled(self, client, city_id):
+        email = f"{uuid.uuid4()}@test.around"
+        with patch("app.routers.auth.settings.REQUIRE_SIGNUP_OTP", False):
+            r = await client.post("/auth/signup", json={"email": email, "password": "testpass123", "display_name": "No OTP", "city": "Vilnius"})
+        assert r.status_code == 200, r.text
+        assert r.json()["token_type"] == "bearer" and r.json()["access_token"]
+
+        async with async_session() as db:
+            from sqlalchemy import select
+            user = await db.scalar(select(User).where(User.email == email))
+            assert user is not None and user.email_verified is True
+            assert await db.scalar(select(PendingSignup).where(PendingSignup.email == email)) is None
+
+    @pytest.mark.asyncio
+    async def test_created_account_can_log_in_immediately(self, client, city_id):
+        email = f"{uuid.uuid4()}@test.around"
+        with patch("app.routers.auth.settings.REQUIRE_SIGNUP_OTP", False):
+            await client.post("/auth/signup", json={"email": email, "password": "testpass123", "display_name": "No OTP 2", "city": "Vilnius"})
+        login = await client.post("/auth/login", json={"email": email, "password": "testpass123"})
+        assert login.status_code == 200, login.text
+
+    @pytest.mark.asyncio
+    async def test_duplicate_email_still_rejected_with_otp_disabled(self, client, city_id):
+        email = f"{uuid.uuid4()}@test.around"
+        await _make_verified_user_with_email(city_id, email)
+        with patch("app.routers.auth.settings.REQUIRE_SIGNUP_OTP", False):
+            r = await client.post("/auth/signup", json={"email": email, "password": "testpass123", "display_name": "Dup", "city": "Vilnius"})
+        assert r.status_code == 409
+
+
 class TestModeration:
     @pytest.mark.asyncio
     async def test_signup_rejects_an_offensive_nickname(self, client, city_id):

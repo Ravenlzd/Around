@@ -45,6 +45,12 @@ jobs:
       DATABASE_URL: postgresql+asyncpg://around:around@localhost:5432/around_ci
       JWT_SECRET: ci-only-secret-not-used-anywhere-else-32chars
       ENV: testing
+      # Explicitly on in CI regardless of production's current default
+      # (currently off — see app/config.py's REQUIRE_SIGNUP_OTP
+      # docstring) — the OTP flow is real, security-sensitive code that
+      # needs to keep working and keep being tested independent of
+      # which mode production happens to be running today.
+      REQUIRE_SIGNUP_OTP: "true"
 
     steps:
       - uses: actions/checkout@v4

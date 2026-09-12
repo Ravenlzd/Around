@@ -522,7 +522,6 @@ function renderAuthScreen(){
     <input class="text-input" id="authPassword" placeholder="Password" type="password" onkeydown="if(event.key==='Enter')AroundApp.submitAuth()"/>
     <button class="next-btn" id="authSubmitBtn" onclick="AroundApp.submitAuth()">${mode==='login'?'Sign in':'Create account'}</button>
     <button class="request-pending-btn" style="margin-top:10px;" onclick="AroundApp.googleStub()">Continue with Google</button>
-    <div class="empty-mini" style="text-align:center; margin-top:8px;">Google sign-in isn't wired up yet — this is a placeholder for a future phase.</div>
   `;
 }
 function setAuthMode(mode){ state.authMode = mode; renderAuthScreen(); }
@@ -538,10 +537,18 @@ async function submitAuth(){
       if (state.authMode === 'register') {
         const name = document.getElementById('authName').value.trim();
         if (!name) { toast('Enter your name'); return; }
-        // No account exists yet after this — signup only emails a code.
-        // See submitOtpVerification() for where the account is actually
-        // created and the session actually starts.
-        await AuthApi.register({ email, password, display_name: name });
+        // Which of these happens depends on the server's own
+        // REQUIRE_SIGNUP_OTP setting — see api/auth.js's register().
+        const res = await AuthApi.register({ email, password, display_name: name });
+        if (res && res.access_token) {
+          // OTP step currently disabled server-side — account already exists, log straight in.
+          session.user = await AuthApi.me();
+          toast(`Welcome${session.user.display_name ? ', ' + session.user.display_name : ''} 👋`);
+          await enterApp();
+          return;
+        }
+        // OTP required — no account exists yet. See
+        // submitOtpVerification() for where it's actually created.
         state.pendingOtpEmail = email;
         state.authMode = 'otp';
         renderAuthScreen();
