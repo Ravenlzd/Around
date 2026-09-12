@@ -9,6 +9,7 @@
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
 <style>
 /* ============ TOKENS ============ */
 :root{
@@ -270,11 +271,12 @@ input,textarea{font-family:inherit; color:inherit; background:none; border:none;
 .search-bar{ margin:0 20px 12px 20px; background:var(--surface-2); border:1px solid var(--border); border-radius:100px; padding:11px 16px; display:flex; align-items:center; gap:8px; flex-shrink:0; }
 .search-bar input{ flex:1; font-size:14px; }
 .search-bar input::placeholder{ color:var(--text-faint); }
-.chip-row{ display:flex; gap:8px; overflow-x:auto; padding:0 20px 14px 20px; flex-shrink:0; }
+.chip-row{ display:flex; gap:10px; overflow-x:auto; padding:0 20px 16px 20px; flex-shrink:0; }
 .filter-chip{
-  font-size:12.5px; font-weight:600; padding:8px 13px; border-radius:100px;
+  font-size:12.5px; font-weight:600; padding:9px 14px; border-radius:100px;
   background:var(--surface-2); border:1px solid var(--border); color:var(--text-dim);
   white-space:nowrap; display:flex; align-items:center; gap:5px; flex-shrink:0;
+  min-height:36px;
 }
 .filter-chip.active{ background:var(--accent); color:var(--accent-ink); border-color:var(--accent); }
 .tonight-banner{
@@ -318,6 +320,10 @@ input,textarea{font-family:inherit; color:inherit; background:none; border:none;
 .profile-loc{ font-size:12.5px; color:var(--text-dim); margin-top:3px; }
 .profile-interests{ display:flex; gap:6px; justify-content:center; flex-wrap:wrap; margin-top:12px; }
 .profile-interests span{ font-size:11px; font-weight:600; padding:6px 11px; border-radius:100px; background:var(--surface-2); border:1px solid var(--border); color:var(--text-dim); }
+.friend-status-pill{ display:inline-block; margin-top:14px; font-size:12px; font-weight:700; padding:9px 16px; border-radius:100px; background:var(--surface-2); border:1px solid var(--border); color:var(--text-dim); }
+.friend-action-row{ display:flex; gap:8px; margin-top:14px; }
+.friend-action-row .next-btn{ flex:1; }
+.friend-decline-btn{ flex:1; padding:15px; border-radius:100px; background:var(--surface); border:1px solid var(--border); color:var(--text-dim); font-weight:700; font-size:14px; }
 .stat-row{ display:flex; gap:10px; padding:0 20px 18px 20px; }
 .stat-box{ flex:1; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-md); padding:13px; text-align:center; }
 .stat-box .n{ font-family:var(--font-display); font-weight:800; font-size:19px; }
@@ -390,12 +396,12 @@ input,textarea{font-family:inherit; color:inherit; background:none; border:none;
 .chat-input-row button{ width:38px; height:38px; border-radius:50%; background:var(--accent); color:var(--accent-ink); font-weight:800; flex-shrink:0; }
 
 /* create flow */
-.step-dots{ display:flex; gap:6px; padding:0 20px 14px 20px; }
+.step-dots{ display:flex; gap:6px; padding:0 20px 18px 20px; position:relative; z-index:1; flex-shrink:0; }
 .step-dots .d{ flex:1; height:3px; border-radius:100px; background:var(--surface-3); }
 .step-dots .d.active{ background:var(--accent); }
-.field-label{ font-size:12px; font-weight:700; color:var(--text-dim); margin:16px 0 8px 0; text-transform:uppercase; letter-spacing:0.04em; font-family:var(--font-mono); }
-.cat-grid{ display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
-.cat-opt{ background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-sm); padding:14px 6px; text-align:center; }
+.field-label{ font-size:12px; font-weight:700; color:var(--text-dim); margin:16px 0 10px 0; text-transform:uppercase; letter-spacing:0.04em; font-family:var(--font-mono); }
+.cat-grid{ display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
+.cat-opt{ background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-sm); padding:16px 6px; text-align:center; min-height:76px; display:flex; flex-direction:column; align-items:center; justify-content:center; }
 .cat-opt.selected{ border-color:var(--accent); background:rgba(200,255,62,0.08); }
 .cat-opt .e{ font-size:22px; }
 .cat-opt .t{ font-size:10.5px; margin-top:6px; font-weight:600; color:var(--text-dim); }
@@ -483,9 +489,32 @@ input,textarea{font-family:inherit; color:inherit; background:none; border:none;
 .checkin-summary button{ font-size:11px; font-weight:700; color:var(--accent-ink); background:var(--accent); padding:8px 12px; border-radius:100px; }
 .qr-box{ margin:10px 0 14px 0; background:#fff; border-radius:var(--radius-sm); padding:16px; display:none; cursor:pointer; }
 .checkin-self-row{ display:flex; gap:8px; margin-top:10px; }
-.checkin-self-row input{ flex:1; background:var(--surface); border:1px solid var(--border); border-radius:100px; padding:11px 15px; font-size:13px; text-transform:uppercase; font-family:var(--font-mono); }
+.checkin-self-row input{ flex:1; background:var(--surface); border:1px solid var(--border); border-radius:100px; padding:11px 15px; font-size:13px; text-transform:uppercase; font-family:var(--font-mono); min-width:0; }
 .checkin-self-row button{ background:var(--accent); color:var(--accent-ink); font-weight:800; font-size:12px; padding:0 16px; border-radius:100px; flex-shrink:0; }
+.checkin-self-row .qr-scan-btn{ width:38px; height:38px; padding:0; background:var(--surface-2); border:1px solid var(--border); color:var(--text); font-size:16px; border-radius:50%; display:flex; align-items:center; justify-content:center; }
 .checkin-confirmed{ margin-top:10px; text-align:center; font-size:12.5px; font-weight:700; color:var(--accent); }
+
+/* QR camera scanner overlay */
+.qr-scanner-overlay{
+  position:absolute; inset:0; z-index:300; background:#000;
+  display:none; flex-direction:column; align-items:center; justify-content:center;
+}
+.qr-scanner-overlay.show{ display:flex; }
+.qr-scanner-overlay video{ width:100%; height:100%; object-fit:cover; }
+.qr-scanner-frame{
+  position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+  width:min(70vw, 260px); aspect-ratio:1; border:3px solid var(--accent); border-radius:20px;
+  box-shadow:0 0 0 2000px rgba(0,0,0,0.45); pointer-events:none;
+}
+.qr-scanner-status{
+  position:absolute; left:20px; right:20px; bottom:calc(90px + env(safe-area-inset-bottom,0px));
+  text-align:center; color:#fff; font-size:13px; font-weight:600; text-shadow:0 1px 4px rgba(0,0,0,0.6);
+}
+.qr-scanner-close{
+  position:absolute; top:calc(16px + env(safe-area-inset-top,0px)); right:16px; z-index:301;
+  width:38px; height:38px; border-radius:50%; background:rgba(19,19,24,0.8); color:#fff;
+  display:flex; align-items:center; justify-content:center; font-size:16px;
+}
 .qr-box.show{ display:block; }
 .qr-grid{ width:100%; aspect-ratio:1; display:grid; grid-template-columns:repeat(12,1fr); grid-template-rows:repeat(12,1fr); gap:2px; }
 .qr-grid div{ background:#0A0A0D; }
@@ -540,6 +569,14 @@ input,textarea{font-family:inherit; color:inherit; background:none; border:none;
 
   <!-- TOAST -->
   <div class="toast" id="toast"></div>
+
+  <!-- QR CAMERA SCANNER (check-in) -->
+  <div class="qr-scanner-overlay" id="qrScannerOverlay">
+    <button class="qr-scanner-close" onclick="AroundApp.closeQrScanner()" title="Close scanner">✕</button>
+    <video id="qrScannerVideo" playsinline muted></video>
+    <div class="qr-scanner-frame"></div>
+    <div class="qr-scanner-status" id="qrScannerStatus">Point your camera at the host's QR code</div>
+  </div>
 
   <!-- ============ HOME (MAP/FEED) ============ -->
   <div class="screen active" id="screen-home">
@@ -691,6 +728,13 @@ input,textarea{font-family:inherit; color:inherit; background:none; border:none;
 
 </div>
 
+<script>
+  // Free CARTO basemap API key — get one at https://carto.com/basemaps/apikey
+  // (no signup fee, 5M tile requests/month free). This is a public,
+  // domain-restricted identifier, not a secret; restrict it to your
+  // domain(s) in the CARTO dashboard rather than keeping it blank.
+  // window.AROUND_CARTO_KEY = 'paste-your-free-carto-key-here';
+</script>
 <script type="module" src="app.js"></script>
 </body>
 </html>

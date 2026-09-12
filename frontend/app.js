@@ -5,6 +5,7 @@ import * as UsersApi from './api/users.js';
 import * as PostsApi from './api/posts.js';
 import * as NotificationsApi from './api/notifications.js';
 import * as MediaApi from './api/media.js';
+import * as FriendsApi from './api/friends.js';
 
 /* ============================================================
    AROUND — wired to a real FastAPI/PostgreSQL backend.
@@ -513,8 +514,21 @@ async function endImFreeAction(){
 }
 
 /* ============================================================
-   MAP (Leaflet + CartoDB dark tiles — no API key required)
+   MAP (Leaflet + CartoDB dark tiles)
 
+   CARTO's anonymous basemaps.cartocdn.com raster tiles now require a
+   free API key (fair-use limit: 5M tile requests/month at no cost) —
+   without one, CARTO serves a watermarked "API KEY REQUIRED" tile
+   instead of an error, which is what was showing on the map. This key
+   is a public, domain-restricted identifier (restrict it to your
+   domains at https://carto.com/basemaps/apikey) — not a secret, so
+   it's fine for it to live in this file. Get a free key there and
+   paste it below; leaving it blank keeps the previous (watermarked)
+   behavior instead of breaking anything.
+   ============================================================ */
+const CARTO_API_KEY = window.AROUND_CARTO_KEY || '';
+
+/* ============================================================
    The map instance is created lazily on first render, once #app is
    actually visible (Leaflet needs a container with real dimensions at
    init time — creating it earlier, while the auth screen is showing,
@@ -563,7 +577,8 @@ function ensureLeafletMap(){
   if (!container) return null;
 
   leafletMap = L.map(container, { zoomControl: true, attributionControl: true }).setView([geo.lat, geo.lng], 14);
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+  const tileUrl = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png' + (CARTO_API_KEY ? `?api_key=${encodeURIComponent(CARTO_API_KEY)}` : '');
+  L.tileLayer(tileUrl, {
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
     subdomains: 'abcd', maxZoom: 19,
   }).addTo(leafletMap);
@@ -804,6 +819,7 @@ function escapeHtml(value){
 }
 async function openUserProfile(userId, sourceEventId){
   state.profileSourceEventId = sourceEventId || null;
+  state.viewingProfileUserId = userId;
   document.getElementById('userProfileContent').innerHTML = `<div class="empty-mini" style="padding:30px 0; text-align:center;">Loading…</div>`;
   openSheet('sheetUserProfile');
   try {
@@ -817,11 +833,49 @@ async function openUserProfile(userId, sourceEventId){
         <div class="profile-name">${escapeHtml(profile.display_name)}</div>
         ${profile.university_or_work ? `<div class="profile-loc">${escapeHtml(profile.university_or_work)}</div>` : ''}
         ${profile.bio ? `<div class="ed-desc">${escapeHtml(profile.bio)}</div>` : ''}
+        ${renderFriendAction(profile.friendship_status, userId)}
       </div>`;
   } catch (err) {
     document.getElementById('userProfileContent').innerHTML = `<div class="empty-state"><div class="e">⚠️</div><div class="t">This profile isn't available.</div></div>`;
     handleApiError(err);
   }
+}
+
+/**
+ * Add Friend / Pending / Friends action for the profile sheet (spec:
+ * "opening another person's profile only shows picture and name" —
+ * this is the missing wiring). Reuses the same Friendship rows
+ * friends.py and events.py already treat as the single source of
+ * truth (via /users/{id}'s friendship_status field) — not a second
+ * friendship system. Blocked users never reach this code at all:
+ * GET /users/{id} 404s for them before friendship_status is computed.
+ */
+function renderFriendAction(status, userId){
+  if (status === 'self' || !userId) return '';
+  if (status === 'accepted') return `<div class="friend-status-pill">✓ Friends</div>`;
+  if (status === 'pending_sent') return `<div class="friend-status-pill">Request sent</div>`;
+  if (status === 'pending_received') return `
+    <div class="friend-action-row">
+      <button class="next-btn" style="margin-top:0;" onclick="AroundApp.respondFriendRequest('${userId}', true)">Accept</button>
+      <button class="friend-decline-btn" onclick="AroundApp.respondFriendRequest('${userId}', false)">Decline</button>
+    </div>`;
+  return `<button class="next-btn" style="margin-top:14px;" onclick="AroundApp.sendFriendRequest('${userId}')">+ Add Friend</button>`;
+}
+
+async function sendFriendRequest(userId){
+  try {
+    await FriendsApi.sendRequest(userId);
+    toast('Friend request sent');
+    openUserProfile(userId, state.profileSourceEventId);
+  } catch (err) { handleApiError(err); }
+}
+
+async function respondFriendRequest(userId, accept){
+  try {
+    if (accept) { await FriendsApi.acceptRequest(userId); toast('Friend request accepted'); }
+    else { await FriendsApi.rejectRequest(userId); toast('Request declined'); }
+    openUserProfile(userId, state.profileSourceEventId);
+  } catch (err) { handleApiError(err); }
 }
 function closeUserProfile(){
   const eventId = state.profileSourceEventId;
@@ -896,6 +950,7 @@ function renderEventDetail(ev){
       <div class="checkin-self-row">
         <input id="checkinCodeInput" placeholder="Check-in code from the host"/>
         <button onclick="AroundApp.selfCheckIn('${ev.id}', this)">Check in</button>
+        <button class="qr-scan-btn" onclick="AroundApp.openQrScanner('${ev.id}')" title="Scan QR code">📷</button>
       </div>` : (mine && mine.checked_in ? `<div class="checkin-confirmed">✅ You're checked in</div>` : '');
     actionHtml = `<div class="join-cta">
         <button class="join-btn going" id="leaveBtn" onclick="AroundApp.leaveEventFlow('${ev.id}', this)">✓ ${isHost(ev)?'HOSTING':'GOING'}${myGuests(ev).length?' + '+myGuests(ev).length+' guest'+(myGuests(ev).length>1?'s':''):''}</button>
@@ -1222,6 +1277,99 @@ async function selfCheckIn(eventId, btn){
     } catch (err) { handleApiError(err, "That code didn't work"); }
   });
 }
+/* ============================================================
+   QR CAMERA SCANNER (check-in)
+
+   Reuses the exact same validation path as manual entry — decoding a
+   QR code here only ever writes the decoded text into #checkinCodeInput
+   and calls the existing selfCheckIn(), which posts to the same
+   /events/{id}/check-in endpoint that validates the signed, expiring,
+   event-scoped token server-side. Nothing about that validation is
+   duplicated or weakened here; this is purely an alternate way to fill
+   in the same code a person could otherwise type by hand — manual entry
+   stays fully functional if the camera is unavailable or denied.
+
+   Uses jsQR (loaded via CDN in index.html) rather than the newer native
+   BarcodeDetector API because BarcodeDetector isn't available in Safari/
+   iOS — a dealbreaker for a consumer app where a large share of users
+   are on iPhones. jsQR is a small, dependency-free, pure-JS decoder that
+   works on any browser with getUserMedia + <canvas>.
+   ============================================================ */
+let qrScannerStream = null;
+let qrScannerRafId = null;
+let qrScannerCanvas = null;
+
+async function openQrScanner(eventId){
+  if (blockedInDemo()) return;
+  if (typeof jsQR === 'undefined') {
+    toast("Camera scanning isn't available right now — use the code field instead");
+    return;
+  }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    toast("This browser can't access the camera — use the code field instead");
+    return;
+  }
+
+  const overlay = document.getElementById('qrScannerOverlay');
+  const video = document.getElementById('qrScannerVideo');
+  const status = document.getElementById('qrScannerStatus');
+  status.textContent = 'Point your camera at the host’s QR code';
+  overlay.classList.add('show');
+
+  try {
+    qrScannerStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+  } catch (err) {
+    overlay.classList.remove('show');
+    if (err && (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError')) {
+      toast('Camera access denied — use the code field instead');
+    } else if (err && err.name === 'NotFoundError') {
+      toast('No camera found — use the code field instead');
+    } else {
+      toast("Couldn't start the camera — use the code field instead");
+    }
+    return;
+  }
+
+  video.srcObject = qrScannerStream;
+  await video.play();
+
+  if (!qrScannerCanvas) qrScannerCanvas = document.createElement('canvas');
+  const canvas = qrScannerCanvas;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+  const scanFrame = () => {
+    if (!qrScannerStream) return; // scanner was closed
+    if (video.readyState === video.HAVE_ENOUGH_DATA) {
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'dontInvert' });
+      if (code && code.data) {
+        const token = code.data.trim();
+        closeQrScanner();
+        const input = document.getElementById('checkinCodeInput');
+        if (input) {
+          input.value = token;
+          selfCheckIn(eventId, document.querySelector('.checkin-self-row button'));
+        }
+        return;
+      }
+    }
+    qrScannerRafId = requestAnimationFrame(scanFrame);
+  };
+  qrScannerRafId = requestAnimationFrame(scanFrame);
+}
+
+function closeQrScanner(){
+  const overlay = document.getElementById('qrScannerOverlay');
+  overlay.classList.remove('show');
+  if (qrScannerRafId) { cancelAnimationFrame(qrScannerRafId); qrScannerRafId = null; }
+  if (qrScannerStream) { qrScannerStream.getTracks().forEach(t => t.stop()); qrScannerStream = null; }
+  const video = document.getElementById('qrScannerVideo');
+  if (video) video.srcObject = null;
+}
+
 async function toggleQR(eventId){
   const box = document.getElementById('qrBox');
   box.classList.toggle('show');
@@ -1686,6 +1834,7 @@ window.AroundApp = {
   state, go, setView, setAuthMode, submitAuth, googleStub, logout, toast, enterDemoMode,
   endImFree: endImFreeAction, openFree, setFree, activateFree,
   setMapFilter, previewPin, closeMapPreview, openEvent, openUserProfile, closeUserProfile,
+  sendFriendRequest, respondFriendRequest,
   setDiscoverCat, filterTonight, onSearchInput, loadMoreSearchResults,
   markNotifRead, backFromActivity,
   openManage, approveRequest, rejectRequest, toggleCheckIn, confirmDangerClick, toggleQR, refreshCheckinQr, copyCheckinToken,
@@ -1696,7 +1845,7 @@ window.AroundApp = {
   openPost, pickExp, publishPost,
   joinEventFlow, leaveEventFlow, requestToJoinFlow, cancelRequestFlow, redeemInviteCode,
   joinWaitlist, leaveWaitlist, claimWaitlistOffer,
-  inviteGuestSubmit, cancelMyGuest, sendChat, selfCheckIn,
+  inviteGuestSubmit, cancelMyGuest, sendChat, selfCheckIn, openQrScanner, closeQrScanner,
 };
 // legacy onclick="renderDiscoverResults()"-style calls in the static
 // markup reference a couple of functions directly for readability —

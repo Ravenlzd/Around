@@ -17,6 +17,7 @@ from app.models import Block, Event, EventParticipant, Friendship, User, UserInt
 from app.schemas import PublicUserOut, UserOut, ProfileUpdate
 from app.deps import get_current_user
 from app.trust import derive_trust_state
+from app.routers.friends import ordered_pair
 
 router = APIRouter()
 
@@ -112,4 +113,26 @@ async def get_public_profile(
     )
     if blocked:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
-    return profile
+
+    if profile_id == user.id:
+        friendship_status = "self"
+    else:
+        a, b = ordered_pair(user.id, profile_id)
+        row = await db.get(Friendship, {"user_id_a": a, "user_id_b": b})
+        if not row:
+            friendship_status = "none"
+        elif row.status == "accepted":
+            friendship_status = "accepted"
+        elif row.status == "pending":
+            friendship_status = "pending_sent" if row.requested_by == user.id else "pending_received"
+        else:
+            friendship_status = "none"
+
+    return {
+        "id": profile.id,
+        "display_name": profile.display_name,
+        "university_or_work": profile.university_or_work,
+        "bio": profile.bio,
+        "avatar_url": profile.avatar_url,
+        "friendship_status": friendship_status,
+    }

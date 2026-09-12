@@ -45,6 +45,12 @@ class PublicUserOut(BaseModel):
     university_or_work: str | None = None
     bio: str | None = None
     avatar_url: str | None = None
+    # One of: self | none | pending_sent | pending_received | accepted —
+    # drives the Add Friend / Pending / Friends button on the frontend's
+    # profile sheet. Computed by the same Friendship rows friends.py and
+    # events.py already treat as the single source of truth; this isn't
+    # a second friendship system, just exposing existing state here too.
+    friendship_status: str = "none"
 
     class Config:
         from_attributes = True
