@@ -279,7 +279,74 @@ async function checkEmailVerificationLink(){
   }
 }
 
+/* ============================================================
+   PWA — installability only, not offline support (see frontend/sw.js).
+
+   iOS Safari never fires beforeinstallprompt and has no programmatic
+   install API at all — Apple's only path is the user manually using
+   Share -> Add to Home Screen, so this only ever shows instructions
+   there, never a fake one-tap "install" button. Android/desktop
+   Chrome (and other browsers implementing the same API) DO support
+   triggering the real native install prompt via a captured
+   beforeinstallprompt event.
+   ============================================================ */
+let deferredInstallPrompt = null;
+let installBannerShownThisSession = false;
+const INSTALL_DISMISSED_KEY = 'around:pwa_prompt_dismissed';
+
+function isStandaloneDisplay(){
+  return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+}
+function isIOSDevice(){
+  return /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+}
+function registerServiceWorker(){
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js').catch(err => console.warn('[Around] service worker registration failed', err));
+  }
+}
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault(); // suppress the browser's own mini-infobar — we show our own banner, on our own timing, instead
+  deferredInstallPrompt = e;
+  maybeShowInstallBanner();
+});
+
+/** Called after the user has actually done something (a nav tap) — see go() — rather than immediately on load. */
+function maybeShowInstallBanner(){
+  if (installBannerShownThisSession || isStandaloneDisplay()) return;
+  let dismissed = false;
+  try { dismissed = localStorage.getItem(INSTALL_DISMISSED_KEY) === '1'; } catch (_) { /* private browsing etc. — just won't remember dismissal across sessions */ }
+  if (dismissed) return;
+  if (!isIOSDevice() && !deferredInstallPrompt) return; // nothing to offer: not iOS, and no captured install event yet
+  installBannerShownThisSession = true;
+  const body = document.getElementById('installBannerBody');
+  if (isIOSDevice()) {
+    body.innerHTML = `
+      <div class="t">Get Around on your Home Screen</div>
+      <div class="s">Add Around to your Home Screen for faster access.</div>
+      <ol><li>Tap the Share button in Safari</li><li>Select <b>Add to Home Screen</b></li><li>Tap <b>Add</b></li></ol>`;
+  } else {
+    body.innerHTML = `
+      <div class="t">Install Around</div>
+      <div class="s">Add Around to your device for faster access, like a real app.</div>
+      <button class="install-cta" onclick="AroundApp.triggerInstallPrompt()">Install Around</button>`;
+  }
+  document.getElementById('installBanner').classList.add('show');
+}
+async function triggerInstallPrompt(){
+  if (!deferredInstallPrompt) return;
+  dismissInstallBanner();
+  deferredInstallPrompt.prompt();
+  try { await deferredInstallPrompt.userChoice; } catch (_) { /* ignore */ }
+  deferredInstallPrompt = null;
+}
+function dismissInstallBanner(){
+  document.getElementById('installBanner').classList.remove('show');
+  try { localStorage.setItem(INSTALL_DISMISSED_KEY, '1'); } catch (_) { /* ignore — worst case it can show again next session */ }
+}
+
 async function boot() {
+  registerServiceWorker();
   wireAuthScreen();
   await checkEmailVerificationLink();
   backendReachable = await isBackendReachable();
@@ -512,6 +579,7 @@ function go(screen){
   if(screen==='activity') openActivity();
   if(screen==='profile') renderProfile();
   if(screen==='chat') renderChatList();
+  maybeShowInstallBanner(); // fires after real navigation, not on initial load — see its own docstring
 }
 function backFromActivity(){ go(state.activityReturnScreen || 'home'); }
 
@@ -969,9 +1037,34 @@ function dmMsgHtml(m){
   </div>`;
 }
 
+/**
+ * The messages actually rendered for the currently-open DM thread,
+ * keyed by server message id. This — not string-concatenating HTML —
+ * is the real fix for the double-send bug: sendDmMessage() appended
+ * the POST response directly, AND the backend's WS broadcast (which
+ * includes the sender's own open socket, same as event chat's
+ * broadcast does) delivered that identical message again to
+ * connectDmSocket()'s onMessage, which also appended unconditionally.
+ * Both paths now go through appendDmMessageIfNew(), so whichever of
+ * the two (HTTP response, WS echo) arrives first renders it and
+ * records its id; the other finds the id already present and no-ops.
+ * No optimistic/temporary local message is ever created, so there's
+ * nothing to "reconcile" — the first render IS the authoritative
+ * server copy either way.
+ */
+let currentDmMessages = [];
+
+function appendDmMessageIfNew(msg){
+  if (currentDmMessages.some(m => m.id === msg.id)) return;
+  currentDmMessages.push(msg);
+  const el = document.getElementById('dmThreadMessages');
+  if (el) { el.innerHTML += dmMsgHtml(msg); el.scrollTop = el.scrollHeight; }
+}
+
 async function openDmThread(friendUserId, displayName){
   if (blockedInDemo()) return;
   currentDmFriendId = friendUserId;
+  currentDmMessages = [];
   const cached = conversationsCache.find(c => c.friend_user_id === friendUserId);
   document.getElementById('dmThreadTitle').textContent = displayName || (cached && cached.display_name) || 'Chat';
   document.getElementById('dmThreadMessages').innerHTML = `<div class="empty-mini">Loading…</div>`;
@@ -987,6 +1080,7 @@ async function openDmThread(friendUserId, displayName){
   }
 }
 function renderDmMessages(messages){
+  currentDmMessages = [...messages];
   const el = document.getElementById('dmThreadMessages');
   if (!el) return;
   el.innerHTML = messages.length ? messages.map(dmMsgHtml).join('') : `<div class="empty-mini">No messages yet — say hi.</div>`;
@@ -998,8 +1092,7 @@ async function connectDmSocket(friendUserId){
     dmSocket = await ChatApi.openDmSocket(friendUserId, {
       onMessage: (msg) => {
         if (currentDmFriendId !== friendUserId) return;
-        const el = document.getElementById('dmThreadMessages');
-        if (el) { el.innerHTML += dmMsgHtml(msg); el.scrollTop = el.scrollHeight; }
+        appendDmMessageIfNew(msg);
       },
     });
   } catch (err) { console.error(err); }
@@ -1007,6 +1100,7 @@ async function connectDmSocket(friendUserId){
 function closeDmThread(){
   if (dmSocket) { dmSocket.close(); dmSocket = null; }
   currentDmFriendId = null;
+  currentDmMessages = [];
   closeAllSheets();
 }
 async function sendDmMessage(){
@@ -1019,8 +1113,7 @@ async function sendDmMessage(){
   inp.value = '';
   try {
     const msg = await ChatApi.sendMessage(friendUserId, val);
-    const el = document.getElementById('dmThreadMessages');
-    if (el) { el.innerHTML += dmMsgHtml(msg); el.scrollTop = el.scrollHeight; }
+    appendDmMessageIfNew(msg);
   } catch (err) { handleApiError(err, "Couldn't send that message"); inp.value = val; }
 }
 
@@ -2324,6 +2417,7 @@ window.AroundApp = {
   resendVerificationEmail,
   openFriendsList, openEditProfile, toggleInterest, filterInterestPicker, saveEditProfile,
   openDmThread, closeDmThread, sendDmMessage,
+  triggerInstallPrompt, dismissInstallBanner,
 };
 // legacy onclick="renderDiscoverResults()"-style calls in the static
 // markup reference a couple of functions directly for readability —
