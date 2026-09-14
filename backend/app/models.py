@@ -59,6 +59,10 @@ class User(Base):
     # gate any *existing* unverified row's access until explicitly
     # turned on.
     email_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Bumped on every successful password change — see PasswordReset's
+    # docstring and app/deps.py::get_current_user for how this makes a
+    # password reset actually invalidate previously-issued JWTs.
+    password_changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
 
@@ -316,6 +320,31 @@ class PendingSignup(Base):
     password_hash: Mapped[str] = mapped_column(String)
     display_name: Mapped[str] = mapped_column(String)
     city_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("cities.id"))
+    otp_hash: Mapped[str] = mapped_column(String)
+    otp_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class PasswordReset(Base):
+    """
+    A password-reset request in progress. Deliberately a DEDICATED
+    table, not a reuse of PendingSignup, even though the shape (hashed
+    OTP, expiry, attempt cap, resend cooldown) is identical: a
+    PendingSignup row existing for an email means "no User exists yet"
+    — the opposite precondition of a password reset, which requires a
+    real, already-existing User. Conflating the two would let one
+    flow's row accidentally satisfy the other's existence/uniqueness
+    check. One row per user (old row replaced on a new request or
+    resend — same upsert-by-delete-then-insert idiom PendingSignup and
+    ImFreeStatus.activate() already use for "one active thing per key").
+    otp_hash is a SHA-256 hash of the 6-digit code, same as
+    PendingSignup — the raw code is never persisted, only emailed once.
+    """
+    __tablename__ = "password_resets"
+    id: Mapped[uuid.UUID] = uuid_pk()
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), unique=True)
     otp_hash: Mapped[str] = mapped_column(String)
     otp_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     attempt_count: Mapped[int] = mapped_column(Integer, default=0)

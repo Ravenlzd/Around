@@ -17,7 +17,8 @@ from app.database import get_db
 from app.interests import INTEREST_GROUPS, INTERESTS
 from app.models import Block, Event, EventParticipant, Friendship, Report, User, UserInterest, UserStats
 from app.moderation import is_inappropriate
-from app.schemas import PublicUserOut, ReportProblemCreate, UserOut, ProfileUpdate
+from app.reports import create_report
+from app.schemas import PublicUserOut, ReportProblemCreate, ReportSubmit, UserOut, ProfileUpdate
 from app.deps import get_current_user
 from app.trust import derive_trust_state
 from app.routers.friends import ordered_pair
@@ -209,6 +210,43 @@ async def unblock_user(user_id: str, user: User = Depends(get_current_user), db:
         await db.delete(existing)
         await db.commit()
     return {"status": "unblocked"}
+
+
+@router.post("/{user_id}/report", status_code=status.HTTP_201_CREATED)
+async def report_user(
+    user_id: str, payload: ReportSubmit,
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    """
+    Report a specific member for moderation review. Mirrors
+    report_event's shape (backend/app/routers/events.py) — target
+    existence is validated against a real row BEFORE app.reports.
+    create_report is ever called, which is what stops target_id
+    manipulation: a client can pass any UUID here, but the only thing
+    that determines whether a Report row gets written is whether that
+    UUID resolves to a real, active user, never the client's say-so.
+
+    Not restricted to friends/attendees/etc — anyone can report anyone,
+    same as blocking. Reviewer-facing only (see app/routers/admin.py);
+    nothing here is ever returned to ordinary users, including the
+    reported user themselves, so this endpoint carries no risk of
+    telling someone they've been reported.
+    """
+    try:
+        target_id = uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    if target_id == user.id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Can't report yourself")
+    target = await db.get(User, target_id)
+    if not target or target.status != "active":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+
+    result = await create_report(
+        db, reporter_id=user.id, target_type="user", target_id=target_id,
+        reason=payload.reason, details=payload.details,
+    )
+    return {"status": result}
 
 
 @router.post("/me/report-problem", status_code=status.HTTP_201_CREATED)

@@ -71,7 +71,7 @@ let eventsLoadingMore = false;
 let state = {
   view:'map', activeCatFilter:null,
   mapFilter:null, discoverCat:null, activeSheet:null, currentEventId:null,
-  createStep:1, createDraft:{}, manageAdvancedOpen:false, authMode:'login', pendingOtpEmail:null, currentScreen:'home', activityReturnScreen:'home', profileSourceEventId:null,
+  createStep:1, createDraft:{}, manageAdvancedOpen:false, authMode:'login', pendingOtpEmail:null, pendingResetEmail:null, currentScreen:'home', activityReturnScreen:'home', profileSourceEventId:null,
 };
 
 const AVATAR_COLORS = ['#C8FF3E','#FF6B4E','#6E8CFF','#FFD166','#B892FF','#5CD6C0'];
@@ -509,6 +509,42 @@ function renderAuthScreen(){
     return;
   }
 
+  if (mode === 'forgot') {
+    el.innerHTML = `
+      <div class="auth-brand"><span class="dot"></span>Around</div>
+      <div style="margin-top:22px; text-align:center;">
+        <div class="profile-name" style="font-size:19px;">Reset your password</div>
+        <div class="auth-tag">Enter your account email and we'll send you a code</div>
+      </div>
+      <input class="text-input" id="forgotEmail" placeholder="Email" type="email" style="margin-top:20px;" onkeydown="if(event.key==='Enter')AroundApp.submitForgotPassword()"/>
+      <button class="next-btn" id="forgotSubmitBtn" onclick="AroundApp.submitForgotPassword()">Send reset code</button>
+      <div class="back-link" style="cursor:pointer;" onclick="AroundApp.setAuthMode('login')">← Back to sign in</div>
+    `;
+    const input = document.getElementById('forgotEmail');
+    if (input) input.focus();
+    return;
+  }
+
+  if (mode === 'reset') {
+    el.innerHTML = `
+      <div class="auth-brand"><span class="dot"></span>Around</div>
+      <div style="margin-top:22px; text-align:center;">
+        <div class="profile-name" style="font-size:19px;">Enter your new password</div>
+        <div class="auth-tag">We sent a 6-digit code to ${escapeHtml(maskEmail(state.pendingResetEmail || ''))}</div>
+      </div>
+      <input class="text-input otp-input" id="resetOtpInput" placeholder="______" inputmode="numeric" pattern="[0-9]*" autocomplete="one-time-code" maxlength="6" style="margin-top:20px;"/>
+      <input class="text-input" id="resetNewPassword" placeholder="New password" type="password" style="margin-top:10px;"/>
+      <input class="text-input" id="resetConfirmPassword" placeholder="Confirm new password" type="password" style="margin-top:10px;" onkeydown="if(event.key==='Enter')AroundApp.submitResetPassword()"/>
+      <button class="next-btn" id="resetSubmitBtn" onclick="AroundApp.submitResetPassword()">Reset password</button>
+      <button class="back-link" id="resetResendBtn" style="width:100%; margin-top:14px; padding:10px; cursor:pointer;" onclick="AroundApp.resendPasswordReset(this)">Resend code</button>
+      <div class="back-link" style="cursor:pointer;" onclick="AroundApp.setAuthMode('login')">← Use a different email</div>
+    `;
+    startResetResendCooldown(45);
+    const input = document.getElementById('resetOtpInput');
+    if (input) input.focus();
+    return;
+  }
+
   el.innerHTML = `
     <div class="auth-brand"><span class="dot"></span>Around</div>
     <div class="auth-tag">The live social layer of your city.</div>
@@ -520,6 +556,7 @@ function renderAuthScreen(){
     ${mode==='register' ? `<input class="text-input" id="authName" placeholder="Name" style="margin-bottom:10px;"/>` : ''}
     <input class="text-input" id="authEmail" placeholder="Email" style="margin-bottom:10px;" type="email"/>
     <input class="text-input" id="authPassword" placeholder="Password" type="password" onkeydown="if(event.key==='Enter')AroundApp.submitAuth()"/>
+    ${mode==='login' ? `<div class="back-link" style="text-align:right; cursor:pointer; margin-top:8px;" onclick="AroundApp.setAuthMode('forgot')">Forgot password?</div>` : ''}
     <button class="next-btn" id="authSubmitBtn" onclick="AroundApp.submitAuth()">${mode==='login'?'Sign in':'Create account'}</button>
     <button class="request-pending-btn" style="margin-top:10px;" onclick="AroundApp.googleStub()">Continue with Google</button>
   `;
@@ -644,6 +681,89 @@ async function resendOtp(btn){
 function cancelOtpVerification(){
   state.pendingOtpEmail = null;
   setAuthMode('register');
+}
+
+/* ============================================================
+   FORGOT / RESET PASSWORD — mirrors the signup-OTP flow above
+   (same UX shape: request a code, enter it + a new password).
+   ============================================================ */
+async function submitForgotPassword(){
+  const btn = document.getElementById('forgotSubmitBtn');
+  await withBusy(btn, async () => {
+    const email = (document.getElementById('forgotEmail').value || '').trim();
+    if (!email) { toast('Enter your email'); return; }
+    try {
+      await AuthApi.requestPasswordReset(email);
+      state.pendingResetEmail = email;
+      state.authMode = 'reset';
+      renderAuthScreen();
+      // Deliberately the same message regardless of whether an account
+      // exists for this email — the backend never reveals that either
+      // (see app/routers/auth.py::request_password_reset), so the UI
+      // shouldn't imply anything different.
+      toast("If that account exists, we've sent a reset code");
+    } catch (err) {
+      if (err.isNetworkError) { toast("Can't reach the server — check your connection"); return; }
+      handleApiError(err, "Couldn't send the reset code");
+    }
+  });
+}
+
+let resetResendCooldownUntil = 0;
+function startResetResendCooldown(seconds){
+  resetResendCooldownUntil = Date.now() + seconds * 1000;
+  tickResetResendButton();
+}
+function tickResetResendButton(){
+  const btn = document.getElementById('resetResendBtn');
+  if (!btn) return;
+  const remaining = Math.ceil((resetResendCooldownUntil - Date.now()) / 1000);
+  if (remaining > 0) {
+    btn.style.opacity = '0.5';
+    btn.style.pointerEvents = 'none';
+    btn.textContent = `Resend code (${remaining}s)`;
+    setTimeout(tickResetResendButton, 1000);
+  } else {
+    btn.style.opacity = '';
+    btn.style.pointerEvents = '';
+    btn.textContent = 'Resend code';
+  }
+}
+async function resendPasswordReset(btn){
+  if (Date.now() < resetResendCooldownUntil) return;
+  await withBusy(btn, async () => {
+    try {
+      await AuthApi.requestPasswordReset(state.pendingResetEmail);
+      toast('New code sent');
+      startResetResendCooldown(45);
+    } catch (err) {
+      handleApiError(err, "Couldn't resend the code");
+    }
+  });
+}
+
+async function submitResetPassword(){
+  const btn = document.getElementById('resetSubmitBtn');
+  await withBusy(btn, async () => {
+    const otp = (document.getElementById('resetOtpInput').value || '').trim();
+    const newPassword = document.getElementById('resetNewPassword').value;
+    const confirmPassword = document.getElementById('resetConfirmPassword').value;
+    if (!/^\d{6}$/.test(otp)) { toast('Enter the 6-digit code'); return; }
+    if (!newPassword || newPassword.length < 8) { toast('Password must be at least 8 characters'); return; }
+    if (newPassword !== confirmPassword) { toast("Passwords don't match"); return; }
+    try {
+      await AuthApi.resetPassword(state.pendingResetEmail, otp, newPassword);
+      session.user = await AuthApi.me();
+      state.pendingResetEmail = null;
+      toast('Password reset — you\'re signed in');
+      await enterApp();
+    } catch (err) {
+      if (err.isNetworkError) { toast("Can't reach the server — check your connection"); return; }
+      // 429 here is the max-attempts case; the backend's own message is
+      // already the right copy (mirrors submitOtpVerification above).
+      toast((err instanceof ApiError && err.message) || 'That code is invalid or has expired.');
+    }
+  });
 }
 
 async function logout(){
@@ -1418,7 +1538,11 @@ async function openUserProfile(userId, sourceEventId){
         <div class="profile-loc">${profile.university_or_work ? escapeHtml(profile.university_or_work) : ''}</div>
         ${profile.bio ? `<div class="ed-desc">${escapeHtml(profile.bio)}</div>` : ''}
         ${renderFriendAction(profile.friendship_status, userId, profile.display_name)}
-        ${isSelf ? '' : `<button class="block-user-link" onclick="AroundApp.blockUserAction('${userId}')">🚫 Block user</button>`}
+        ${isSelf ? '' : `
+          <div style="display:flex; gap:8px; justify-content:center; margin-top:18px;">
+            <button class="block-user-link" style="margin:0;" onclick="AroundApp.blockUserAction('${userId}')">🚫 Block user</button>
+            <button class="block-user-link" style="margin:0;" data-name="${escapeHtml(profile.display_name || '')}" onclick="AroundApp.openReportTarget('user','${userId}', this.dataset.name)">🚩 Report</button>
+          </div>`}
       </div>`;
   } catch (err) {
     document.getElementById('userProfileContent').innerHTML = `<div class="empty-state"><div class="e">⚠️</div><div class="t">This profile isn't available.</div></div>`;
@@ -1647,6 +1771,7 @@ function renderEventDetail(ev){
       </div>
     </div>
     ${actionHtml}
+    ${isHost(ev) ? '' : `<button class="block-user-link" data-title="${escapeHtml(ev.title || '')}" onclick="AroundApp.openReportTarget('event','${ev.id}', this.dataset.title)">🚩 Report event</button>`}
   `;
 }
 
@@ -2446,7 +2571,10 @@ async function publishPost(btn){
 }
 
 /* ============================================================
-   REPORT A PROBLEM
+   REPORT A PROBLEM (app-level feedback — unrelated to reporting a
+   specific person/event below, kept separate on purpose: this is
+   feedback to Around about the app itself, not a moderation signal
+   about another member.
 
    Previously a static toast with nothing behind it. Reuses the same
    Report model events.py's per-event report endpoint already writes
@@ -2454,6 +2582,7 @@ async function publishPost(btn){
    inventing a separate feedback mechanism.
    ============================================================ */
 function openReportProblem(){
+  document.getElementById('reportSheetTitle').textContent = 'Report a problem';
   document.getElementById('reportContent').innerHTML = `
     <div class="field-label">What went wrong?</div>
     <textarea class="textarea-input" id="reportText" style="min-height:120px;" placeholder="Describe the problem — what happened, what you expected, and any steps to reproduce it…" maxlength="1000"></textarea>
@@ -2475,14 +2604,63 @@ async function submitReportProblem(btn){
 }
 
 /* ============================================================
+   REPORT A USER / REPORT AN EVENT
+
+   Moderation reports on a specific member or event — separate from
+   Report a Problem above (that's app feedback; this goes to
+   POST /users/{id}/report or /events/{id}/report for review — see
+   backend/app/reports.py). Reuses the same sheetReport sheet/markup,
+   just with a target-aware title and submit handler, rather than a
+   second sheet duplicating the same layout.
+   ============================================================ */
+const REPORT_REASONS = ['Harassment or abuse', 'Spam', 'Inappropriate content', 'Fake or misleading', 'Safety concern', 'Other'];
+let reportTarget = null; // { type: 'user'|'event', id: string, label: string }
+
+function openReportTarget(type, id, label){
+  if (blockedInDemo()) return;
+  reportTarget = { type, id, label: label || (type === 'user' ? 'this person' : 'this event') };
+  document.getElementById('reportSheetTitle').textContent = type === 'user' ? 'Report user' : 'Report event';
+  document.getElementById('reportContent').innerHTML = `
+    <div class="field-label">Why are you reporting ${escapeHtml(reportTarget.label)}?</div>
+    <div class="dist-row" id="reportReasonRow" style="flex-wrap:wrap;">${REPORT_REASONS.map((r,i)=>`<button class="${i===0?'selected':''}" onclick="AroundApp.pickReportReason(this,'${r}')">${r}</button>`).join('')}</div>
+    <div class="field-label" style="margin-top:14px;">Additional details (optional)</div>
+    <textarea class="textarea-input" id="reportDetails" style="min-height:90px;" placeholder="Anything else that would help us review this…" maxlength="1000"></textarea>
+    <button class="next-btn" id="reportTargetSubmitBtn" onclick="AroundApp.submitReportTarget(this)">Submit report</button>
+  `;
+  window._reportReason = REPORT_REASONS[0];
+  openSheet('sheetReport');
+}
+function pickReportReason(btn, reason){
+  document.querySelectorAll('#reportReasonRow button').forEach(b=>b.classList.remove('selected'));
+  btn.classList.add('selected');
+  window._reportReason = reason;
+}
+async function submitReportTarget(btn){
+  if (blockedInDemo() || !reportTarget) return;
+  await withBusy(btn, async () => {
+    const details = document.getElementById('reportDetails').value.trim();
+    const reason = window._reportReason || REPORT_REASONS[0];
+    try {
+      const fn = reportTarget.type === 'user' ? UsersApi.reportUser : EventsApi.reportEvent;
+      const res = await fn(reportTarget.id, reason, details);
+      closeAllSheets();
+      toast(res && res.status === 'already_reported' ? "You've already reported this — we're on it" : 'Thanks — our team will review this');
+      reportTarget = null;
+    } catch (err) { handleApiError(err, "Couldn't submit that report"); }
+  });
+}
+
+/* ============================================================
    PUBLIC API — everything the inline onclick="" handlers call
    ============================================================ */
 window.AroundApp = {
   state, go, setView, setAuthMode, submitAuth, googleStub, logout, toast, enterDemoMode,
   submitOtpVerification, resendOtp, cancelOtpVerification,
+  submitForgotPassword, resendPasswordReset, submitResetPassword,
   endImFree: endImFreeAction, openFree, setFree, activateFree,
   setMapFilter, previewPin, closeMapPreview, openEvent, openUserProfile, closeUserProfile,
   sendFriendRequest, respondFriendRequest, blockUserAction, openReportProblem, submitReportProblem,
+  openReportTarget, pickReportReason, submitReportTarget,
   setDiscoverCat, filterTonight, onSearchInput, loadMoreSearchResults,
   markNotifRead, backFromActivity, respondFriendRequestFromNotif,
   openManage, approveRequest, rejectRequest, toggleCheckIn, confirmDangerClick, toggleQR, refreshCheckinQr, copyCheckinToken,

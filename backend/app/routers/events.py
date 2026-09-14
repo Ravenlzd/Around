@@ -38,6 +38,7 @@ from sqlalchemy import cast as sa_cast
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.blocking import blocked_ids
 from app.database import get_db
 from app.models import (
     Event, EventParticipant, EventMessage, EventJoinRequest, EventWaitlist,
@@ -45,11 +46,13 @@ from app.models import (
 )
 from app.schemas import (
     EventCreate, EventUpdate, EventOut, ChatMessageCreate, JoinRequestCreate, GuestInviteCreate,
-    CheckInCreate, CheckInTokenOut, AttendanceOut, BanCreate,
+    CheckInCreate, CheckInTokenOut, AttendanceOut, BanCreate, ReportSubmit,
 )
 from app.deps import get_current_user, require_verified_user
 from app import attendance_rules as rules
 from app.location import reveal_location, reveal_coordinates
+from app.moderation import is_inappropriate
+from app.reports import create_report
 from app.ws import chat_ws_manager
 from app.notify import notify
 from app.routers import friends
@@ -129,6 +132,55 @@ async def _assert_not_already_attending(db: AsyncSession, event_id: uuid.UUID, u
         raise HTTPException(status.HTTP_409_CONFLICT, "Already attending this event")
 
 
+async def _assert_no_block_conflict(db: AsyncSession, event: Event, user_id: uuid.UUID, *, action: str = "join this event"):
+    """
+    Blocking must be a real barrier against contact, not just a
+    profile/DM/discovery cosmetic — an event is a shared room (attendee
+    list + group chat) two people can otherwise be placed into
+    together. Called at every path that puts `user_id` in that room for
+    the first time (direct join, invite-code join, a join request —
+    even just *requesting* notifies the host — and waitlist
+    join/claim), AND reused by post_chat_message (via `action="post in
+    this event's chat"`) to cut off *new* messages between two people
+    who were both already attending before either blocked the other —
+    the one case the join-time checks alone can't prevent, since it
+    predates them. Checks against the host AND every currently "going"
+    attendee, not just the host, so "B must not be able to join an
+    event where A is already attending" holds for ordinary attendees
+    too, not only when A happens to be hosting.
+
+    Deliberately query-time / authorization-time prevention, NOT a
+    retroactive cleanup: existing event_participants rows from BEFORE a
+    block existed are left untouched — ejecting someone from an event
+    they're already legitimately attending is a host action (ban/
+    remove), not something a third party's later, unrelated block
+    should silently trigger. Attendance itself is preserved; only NEW
+    joins and NEW chat messages are cut off going forward.
+
+    Guest rows (EventParticipant.type == "guest") have no user_id at
+    all — anonymous, no account, nothing to block — so they're
+    naturally excluded from the "going" set below without special-
+    casing.
+    """
+    others = {event.host_user_id} if event.host_user_id else set()
+    going = (await db.scalars(
+        select(EventParticipant.user_id).where(
+            EventParticipant.event_id == event.id, EventParticipant.status == "going",
+            EventParticipant.user_id.isnot(None),
+        )
+    )).all()
+    others |= set(going)
+    others.discard(user_id)
+    if not others:
+        return
+    blocked = await blocked_ids(db, user_id)
+    # Deliberately generic — "you're blocked by someone attending this
+    # event" would itself leak which of possibly-many attendees blocked
+    # you (and that a block relationship exists at all) in a small event.
+    if others & blocked:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, f"Can't {action}")
+
+
 def _to_out(event: Event, occupancy: int, distance_km: float | None = None, host_name: str | None = None) -> EventOut:
     return EventOut(
         id=event.id, title=event.title, category=event.category, description=event.description,
@@ -142,6 +194,11 @@ def _to_out(event: Event, occupancy: int, distance_km: float | None = None, host
 
 @router.post("", response_model=EventOut, status_code=status.HTTP_201_CREATED)
 async def create_event(payload: EventCreate, user: User = Depends(require_verified_user), db: AsyncSession = Depends(get_db)):
+    # Title/description are public, stranger-facing text shown in
+    # Discover/map/search to anyone in the city — previously had no
+    # moderation at all despite being at least as visible as a bio.
+    if is_inappropriate(payload.title) or is_inappropriate(payload.description):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Please remove inappropriate language from the title or description")
     event = Event(
         host_user_id=user.id,
         city_id=user.city_id,
@@ -298,6 +355,8 @@ async def update_event(
     _enforce(decision)
 
     updates = payload.model_dump(exclude_unset=True, exclude={"latitude", "longitude"})
+    if is_inappropriate(updates.get("title")) or is_inappropriate(updates.get("description")):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Please remove inappropriate language from the title or description")
     for field, value in updates.items():
         setattr(event, field, value)
     if payload.latitude is not None and payload.longitude is not None:
@@ -397,6 +456,7 @@ async def cancel_event(
 @router.post("/{event_id}/join", status_code=status.HTTP_200_OK)
 async def join_event(event_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     event = await _lock_event(db, event_id)
+    await _assert_no_block_conflict(db, event, user.id)
     is_banned = await db.get(EventBan, {"event_id": event_id, "user_id": user.id}) is not None
     already = await db.scalar(
         select(EventParticipant).where(
@@ -438,6 +498,7 @@ async def join_with_invite_code(
     user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
 ):
     event = await _lock_event(db, event_id)
+    await _assert_no_block_conflict(db, event, user.id)
     is_banned = await db.get(EventBan, {"event_id": event_id, "user_id": user.id}) is not None
     already = await db.scalar(
         select(EventParticipant).where(
@@ -500,6 +561,7 @@ async def create_join_request(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "This event doesn't require approval")
     await _assert_not_banned(db, event_id, user.id)
     await _assert_not_already_attending(db, event_id, user.id)
+    await _assert_no_block_conflict(db, event, user.id)
 
     existing = await db.scalar(
         select(EventJoinRequest).where(
@@ -530,6 +592,10 @@ async def approve_join_request(
     req = await db.get(EventJoinRequest, request_id)
     if not req or req.event_id != event_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Request not found")
+    # Defense-in-depth: create_join_request already refuses a blocked
+    # pair up front, but a block can happen AFTER the request was sent
+    # and before the host acts on it — don't let approval seat them anyway.
+    await _assert_no_block_conflict(db, event, req.user_id)
 
     occ = await _occupancy(db, event_id)
     decision = rules.decide_approve_request(
@@ -591,6 +657,7 @@ async def join_waitlist(event_id: uuid.UUID, user: User = Depends(get_current_us
     event = await db.get(Event, event_id)
     if not event or event.status != "active":
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
+    await _assert_no_block_conflict(db, event, user.id)
 
     is_banned = await db.get(EventBan, {"event_id": event_id, "user_id": user.id}) is not None
     already_attending = await db.scalar(
@@ -636,6 +703,10 @@ async def leave_waitlist(event_id: uuid.UUID, user: User = Depends(get_current_u
 @router.post("/{event_id}/waitlist/claim", status_code=status.HTTP_200_OK)
 async def claim_waitlist_offer(event_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     event = await _lock_event(db, event_id)
+    # Defense-in-depth: join_waitlist already refuses a blocked pair up
+    # front, but a block can happen AFTER joining the waitlist and
+    # before the offer is claimed.
+    await _assert_no_block_conflict(db, event, user.id)
     entry = await db.scalar(
         select(EventWaitlist).where(
             EventWaitlist.event_id == event_id, EventWaitlist.user_id == user.id, EventWaitlist.status == "offered"
@@ -998,6 +1069,17 @@ async def post_chat_message(
     event = await db.get(Event, event_id)
     if event and event.status != "active":
         raise HTTPException(status.HTTP_409_CONFLICT, "This event was cancelled — chat is read-only now")
+    # Covers the residual case join-time checks can't: two people who
+    # were BOTH already attending before either blocked the other. Their
+    # attendance is left alone (see _assert_no_block_conflict's
+    # docstring) but they can no longer exchange NEW messages.
+    if event:
+        await _assert_no_block_conflict(db, event, user.id, action="post in this event's chat")
+    # Event chat is the one place strangers who've never met message each
+    # other with zero prior relationship gate (unlike DMs, which require
+    # an accepted friendship) — previously had no moderation at all.
+    if is_inappropriate(payload.body):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Please remove inappropriate language from your message")
     msg = EventMessage(event_id=event_id, user_id=user.id, body=payload.body)
     db.add(msg)
     await db.commit()
@@ -1010,14 +1092,28 @@ async def post_chat_message(
 # ---------- reports / bans ----------
 
 @router.post("/{event_id}/report", status_code=status.HTTP_201_CREATED)
-async def report_event(event_id: uuid.UUID, reason: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    from app.models import Report  # local import: Report is a general-purpose table, not event-specific
+async def report_event(
+    event_id: uuid.UUID, payload: ReportSubmit,
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    """
+    Now wired to the frontend (previously existed but nothing called
+    it). Body moved from a bare `reason` query param to ReportSubmit —
+    a pure additive contract change (adds optional `details`), safe
+    because nothing was calling the old shape yet. target existence is
+    validated against a real Event row before app.reports.create_report
+    ever runs, same IDOR protection report_user has.
+    """
     event = await db.get(Event, event_id)
     if not event:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
-    db.add(Report(reporter_id=user.id, target_type="event", target_id=event_id, reason=reason))
-    await db.commit()
-    return {"status": "reported"}
+    if event.host_user_id == user.id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Can't report your own event")
+    result = await create_report(
+        db, reporter_id=user.id, target_type="event", target_id=event_id,
+        reason=payload.reason, details=payload.details,
+    )
+    return {"status": result}
 
 
 @router.post("/{event_id}/ban", status_code=status.HTTP_200_OK)

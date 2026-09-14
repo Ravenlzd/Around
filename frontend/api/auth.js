@@ -50,6 +50,30 @@ export async function login(payload) {
   return res;
 }
 
+/**
+ * Always resolves with the same generic shape whether or not the email
+ * has an account — the backend never reveals that (account-enumeration
+ * guard), so there's nothing for the caller to branch on besides a
+ * genuine network/rate-limit error.
+ * @param {string} email
+ */
+export async function requestPasswordReset(email) {
+  return apiClient.post("/auth/request-password-reset", { email }, { auth: false });
+}
+
+/**
+ * Completes a password reset: verifies the OTP, sets the new password,
+ * and logs the user in with a fresh token (this also invalidates every
+ * previously-issued token server-side — see app/deps.py::get_current_user).
+ * @param {string} email @param {string} otp @param {string} newPassword
+ * @returns {Promise<TokenResponse>}
+ */
+export async function resetPassword(email, otp, newPassword) {
+  const res = await apiClient.post("/auth/reset-password", { email, otp, new_password: newPassword }, { auth: false });
+  await apiClient.tokens.set(res.access_token);
+  return res;
+}
+
 /** Google OAuth is stubbed server-side (501) — see backend README. Not called from the UI yet. */
 export async function loginWithGoogle() {
   throw new Error("Google sign-in isn't wired up yet — use email and password for now.");

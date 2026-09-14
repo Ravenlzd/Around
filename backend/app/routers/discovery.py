@@ -27,7 +27,8 @@ from sqlalchemy import select, func, or_, cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models import Event, EventParticipant, User, UserInterest, Friendship, Block
+from app.blocking import blocked_ids
+from app.models import Event, EventParticipant, User, UserInterest, Friendship
 from app.ranking import EventCandidate, rank_events
 from app.deps import get_current_user
 from app.location import reveal_location, reveal_coordinates
@@ -61,6 +62,7 @@ async def _user_interests(db: AsyncSession, user_id) -> set:
     """Real signal for ranking — was previously a hardcoded placeholder set."""
     rows = (await db.scalars(select(UserInterest.interest).where(UserInterest.user_id == user_id))).all()
     return set(rows)
+
 
 
 async def _friend_ids(db: AsyncSession, user_id) -> set:
@@ -129,14 +131,24 @@ async def nearby(
     user_point = cast(ST_SetSRID(ST_MakePoint(lng, lat), 4326), Geography)
     distance_m = ST_Distance(Event.location, user_point)
 
+    # Previously only /discovery/people excluded blocked users — an
+    # event hosted by someone you (or who) blocked still showed up here
+    # and in /search, which is a real gap for "does blocking actually
+    # keep them out of my view" (host_user_id.is_(None) covers the rare
+    # host-account-deleted case, where NOT IN would otherwise silently
+    # drop the row instead of just not filtering it).
+    blocked_user_ids = await blocked_ids(db, user.id)
+    conditions = [
+        Event.status == "active",
+        Event.starts_at > datetime.now(timezone.utc),
+        distance_m <= radius_km * 1000,
+        or_(Event.access_mode != "private", Event.host_user_id == user.id),
+    ]
+    if blocked_user_ids:
+        conditions.append(or_(Event.host_user_id.is_(None), Event.host_user_id.notin_(blocked_user_ids)))
     stmt = (
         select(Event, (distance_m / 1000).label("distance_km"), ST_Y(cast(Event.location, Geometry)).label("lat"), ST_X(cast(Event.location, Geometry)).label("lng"))
-        .where(
-            Event.status == "active",
-            Event.starts_at > datetime.now(timezone.utc),
-            distance_m <= radius_km * 1000,
-            or_(Event.access_mode != "private", Event.host_user_id == user.id),
-        )
+        .where(*conditions)
     )
     if category:
         stmt = stmt.where(Event.category == category)
@@ -211,13 +223,7 @@ async def people_nearby(
     if user.hide_from_nearby:
         return []  # if you've hidden yourself, you don't get to browse others either — consistent, not punitive
 
-    blocked_pairs = (await db.scalars(
-        select(Block).where(or_(Block.blocker_id == user.id, Block.blocked_id == user.id))
-    )).all()
-    excluded_ids = {user.id}
-    for b in blocked_pairs:
-        excluded_ids.add(b.blocker_id)
-        excluded_ids.add(b.blocked_id)
+    excluded_ids = {user.id} | await blocked_ids(db, user.id)
 
     candidates = (await db.scalars(
         select(User).where(
@@ -313,6 +319,10 @@ async def search(
         conditions.append(Event.search_vector.match(q))
     if category:
         conditions.append(Event.category == category)
+    # Same block exclusion as nearby() above — see app/blocking.py.
+    blocked_user_ids = await blocked_ids(db, user.id)
+    if blocked_user_ids:
+        conditions.append(or_(Event.host_user_id.is_(None), Event.host_user_id.notin_(blocked_user_ids)))
 
     total = await db.scalar(select(func.count()).select_from(Event).where(*conditions))
 

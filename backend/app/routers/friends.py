@@ -18,7 +18,7 @@ from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models import User, Friendship
+from app.models import User, Friendship, Block
 from app.deps import get_current_user, require_verified_user
 
 router = APIRouter()
@@ -44,6 +44,27 @@ async def send_request(target_user_id: uuid.UUID, user: User = Depends(require_v
     target = await db.get(User, target_user_id)
     if not target:
         raise HTTPException(404, "User not found")
+
+    # Real fix, not defense-in-depth: a block was previously NOT checked
+    # here at all. users.py's block_user() records a block in the
+    # dedicated Block table and DELETES any Friendship row between the
+    # two users — it never sets Friendship.status='blocked' (nothing in
+    # this codebase does; that branch just below is effectively dead
+    # code against the current block implementation). So without this
+    # check, a blocked user could still send a fresh friend request:
+    # `existing` would simply be None post-block and this function would
+    # fall straight through to creating a new pending row and notifying
+    # the person who blocked them.
+    blocked = await db.scalar(
+        select(Block).where(
+            or_(
+                (Block.blocker_id == user.id) & (Block.blocked_id == target_user_id),
+                (Block.blocker_id == target_user_id) & (Block.blocked_id == user.id),
+            )
+        )
+    )
+    if blocked:
+        raise HTTPException(403, "Can't send a request to this user")
 
     a, b = ordered_pair(user.id, target_user_id)
     existing = await db.get(Friendship, {"user_id_a": a, "user_id_b": b})

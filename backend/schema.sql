@@ -49,6 +49,14 @@ CREATE TABLE users (
     -- pre-existing users to backfill, unlike migrations/0003 in
     -- production, so the plain column default is correct here.
     email_verified      BOOLEAN NOT NULL DEFAULT false,
+    -- Bumped on every successful password change (self-service edit or
+    -- reset) — embedded in freshly-issued JWTs (see app/routers/auth.py's
+    -- create_access_token) and checked on every request (app/deps.py's
+    -- get_current_user) so a stolen/old token stops working the moment
+    -- the password it was issued for is no longer current, without
+    -- needing a server-side session/revocation table for the stateless
+    -- JWTs this app otherwise uses.
+    password_changed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -318,6 +326,25 @@ CREATE TABLE pending_signups (
     password_hash   TEXT NOT NULL,
     display_name    TEXT NOT NULL,
     city_id         UUID REFERENCES cities(id) NOT NULL,
+    otp_hash        TEXT NOT NULL,
+    otp_expires_at  TIMESTAMPTZ NOT NULL,
+    attempt_count   INTEGER NOT NULL DEFAULT 0,
+    last_sent_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ---------- Password reset (OTP) ----------
+-- Same shape/security properties as pending_signups' OTP (hashed code,
+-- short expiry, capped attempts, resend cooldown) but a DEDICATED
+-- table, not reused: pending_signups existing for an email means "no
+-- User row yet" — the opposite precondition of a password reset, which
+-- requires a real, existing User. Conflating the two would let one
+-- flow's row accidentally satisfy the other's existence check. One row
+-- per user (old row replaced on a new request/resend), same
+-- upsert-by-delete-then-insert idiom as pending_signups/im_free_status.
+CREATE TABLE password_resets (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id         UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
     otp_hash        TEXT NOT NULL,
     otp_expires_at  TIMESTAMPTZ NOT NULL,
     attempt_count   INTEGER NOT NULL DEFAULT 0,

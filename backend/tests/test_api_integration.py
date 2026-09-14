@@ -24,15 +24,17 @@ database.
 """
 import asyncio
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
+from sqlalchemy import select
 
 from app.main import app
 from app.database import async_session
-from app.models import Block, City, Friendship, User
-from app.routers.auth import pwd_context, create_access_token
+from app.models import Block, City, EventParticipant, Friendship, PasswordReset, Report, User
+from app.routers.auth import pwd_context, create_access_token, _hash_secret
 
 
 @pytest.fixture(scope="session")
@@ -545,3 +547,395 @@ class TestEventUpdateAndCancel:
         await client.post(f"/events/{event_id}/cancel", headers={"Authorization": f"Bearer {host_token}"})
         r = await client.post(f"/events/{event_id}/check-in", json={"method": "manual"}, headers={"Authorization": f"Bearer {host_token}"})
         assert r.status_code == 409
+
+
+class TestPasswordReset:
+    """
+    Password reset (added this pass — see app/models.py's PasswordReset
+    and app/routers/auth.py's request_password_reset/reset_password).
+    Directly inserting a PasswordReset row with a known OTP (rather than
+    reading it off a real email) mirrors this file's own established
+    pattern for testing something normally delivered out-of-band — see
+    TestProfiles.test_blocked_profiles_are_not_readable inserting a
+    Block row directly instead of going through a UI action that has no
+    API equivalent.
+    """
+
+    async def _seed_reset(self, user_id, otp="123456", *, expired=False, attempts=0):
+        async with async_session() as db:
+            await db.execute(PasswordReset.__table__.delete().where(PasswordReset.user_id == user_id))
+            db.add(PasswordReset(
+                user_id=user_id, otp_hash=_hash_secret(otp),
+                otp_expires_at=datetime.now(timezone.utc) + (timedelta(minutes=-1) if expired else timedelta(minutes=10)),
+                attempt_count=attempts,
+            ))
+            await db.commit()
+
+    @pytest.mark.asyncio
+    async def test_request_reset_is_generic_for_known_and_unknown_email(self, client, city_id):
+        """Account-enumeration guard: identical response either way."""
+        user_id, _ = await _make_user(city_id, "ResetKnown")
+        async with async_session() as db:
+            user = await db.get(User, user_id)
+            known_email = user.email
+
+        known = await client.post("/auth/request-password-reset", json={"email": known_email})
+        unknown = await client.post("/auth/request-password-reset", json={"email": f"{uuid.uuid4()}@nowhere.test"})
+        assert known.status_code == 200 and unknown.status_code == 200
+        assert known.json() == unknown.json() == {"status": "if_account_exists_email_sent"}
+
+    @pytest.mark.asyncio
+    async def test_full_reset_flow_changes_password_and_invalidates_old_tokens(self, client, city_id):
+        user_id, old_token = await _make_user(city_id, "ResetFlow")
+        await self._seed_reset(user_id, "654321")
+        async with async_session() as db:
+            email = (await db.get(User, user_id)).email
+
+        # Old token works before the reset.
+        pre = await client.get("/auth/me", headers={"Authorization": f"Bearer {old_token}"})
+        assert pre.status_code == 200
+
+        r = await client.post("/auth/reset-password", json={"email": email, "otp": "654321", "new_password": "brandNewPass123"})
+        assert r.status_code == 200, r.text
+        new_token = r.json()["access_token"]
+
+        # Old token is now rejected — this is the actual security property
+        # a reset is supposed to provide (a stolen token stops working).
+        stale = await client.get("/auth/me", headers={"Authorization": f"Bearer {old_token}"})
+        assert stale.status_code == 401
+
+        # New token works, and the new password logs in.
+        fresh = await client.get("/auth/me", headers={"Authorization": f"Bearer {new_token}"})
+        assert fresh.status_code == 200
+
+        login = await client.post("/auth/login", json={"email": email, "password": "brandNewPass123"})
+        assert login.status_code == 200, login.text
+
+        old_login = await client.post("/auth/login", json={"email": email, "password": "testpass123"})
+        assert old_login.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_reset_is_single_use(self, client, city_id):
+        user_id, _ = await _make_user(city_id, "ResetOnce")
+        await self._seed_reset(user_id, "111222")
+        async with async_session() as db:
+            email = (await db.get(User, user_id)).email
+        first = await client.post("/auth/reset-password", json={"email": email, "otp": "111222", "new_password": "firstNewPass123"})
+        assert first.status_code == 200, first.text
+        replay = await client.post("/auth/reset-password", json={"email": email, "otp": "111222", "new_password": "secondNewPass123"})
+        assert replay.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_reset_rejects_expired_otp(self, client, city_id):
+        user_id, _ = await _make_user(city_id, "ResetExpired")
+        await self._seed_reset(user_id, "222333", expired=True)
+        async with async_session() as db:
+            email = (await db.get(User, user_id)).email
+        r = await client.post("/auth/reset-password", json={"email": email, "otp": "222333", "new_password": "newPassword123"})
+        assert r.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_reset_locks_out_after_max_wrong_attempts(self, client, city_id):
+        user_id, _ = await _make_user(city_id, "ResetLockout")
+        await self._seed_reset(user_id, "333444")
+        async with async_session() as db:
+            email = (await db.get(User, user_id)).email
+        last = None
+        for _ in range(5):
+            last = await client.post("/auth/reset-password", json={"email": email, "otp": "000000", "new_password": "newPassword123"})
+        assert last.status_code == 429
+        # Even the CORRECT code is now refused — the attempt cap, not just
+        # "that specific wrong guess", is what's enforced.
+        correct_after_lockout = await client.post("/auth/reset-password", json={"email": email, "otp": "333444", "new_password": "newPassword123"})
+        assert correct_after_lockout.status_code == 429
+
+    @pytest.mark.asyncio
+    async def test_reset_rejects_unknown_email(self, client):
+        r = await client.post("/auth/reset-password", json={"email": f"{uuid.uuid4()}@nowhere.test", "otp": "123456", "new_password": "newPassword123"})
+        assert r.status_code == 400
+
+
+class TestBlockingAndModeration:
+    """
+    Regression coverage for the block-bypass and moderation-coverage
+    gaps found in this pass's audit (see friends.py, discovery.py,
+    chat.py, events.py, posts.py for the actual fixes).
+    """
+
+    @pytest.mark.asyncio
+    async def test_blocked_user_cannot_send_friend_request(self, client, city_id):
+        target_id, target_token = await _make_user(city_id, "BlockTarget")
+        blocker_id, blocker_token = await _make_user(city_id, "Blocker")
+        # blocker blocks target, THEN target tries to send a friend request anyway
+        await client.post(f"/users/{target_id}/block", headers={"Authorization": f"Bearer {blocker_token}"})
+        r = await client.post(f"/friends/request/{blocker_id}", headers={"Authorization": f"Bearer {target_token}"})
+        assert r.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_blocked_hosts_events_excluded_from_nearby_and_search(self, client, city_id):
+        host_id, host_token = await _make_user(city_id, "BlockedHost")
+        viewer_id, viewer_token = await _make_user(city_id, "BlockViewer")
+        event_id = await _make_event(client, host_token, title="Unique Block Test Event", capacity=5)
+
+        # Sanity: visible before any block.
+        before = await client.get("/discovery/nearby", params={"lat": 54.69, "lng": 25.28, "radius_km": 50}, headers={"Authorization": f"Bearer {viewer_token}"})
+        assert any(e["id"] == event_id for e in before.json()["results"])
+
+        await client.post(f"/users/{host_id}/block", headers={"Authorization": f"Bearer {viewer_token}"})
+
+        nearby = await client.get("/discovery/nearby", params={"lat": 54.69, "lng": 25.28, "radius_km": 50}, headers={"Authorization": f"Bearer {viewer_token}"})
+        assert all(e["id"] != event_id for e in nearby.json()["results"])
+
+        search = await client.get("/discovery/search", params={"q": "Unique Block Test Event"}, headers={"Authorization": f"Bearer {viewer_token}"})
+        assert all(e["id"] != event_id for e in search.json()["results"])
+
+    @pytest.mark.asyncio
+    async def test_event_chat_rejects_profane_message(self, client, city_id):
+        _, host_token = await _make_user(city_id, "ModHost")
+        event_id = await _make_event(client, host_token, capacity=5)
+        r = await client.post(f"/events/{event_id}/chat", json={"body": "you are a fucking idiot"}, headers={"Authorization": f"Bearer {host_token}"})
+        assert r.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_create_event_rejects_profane_title(self, client, city_id):
+        _, host_token = await _make_user(city_id, "ModCreator")
+        r = await client.post(
+            "/events",
+            json={
+                "title": "fuck this event", "category": "sports", "description": "desc",
+                "latitude": 54.69, "longitude": 25.28, "starts_at": "2030-01-01T18:00:00Z",
+                "capacity": 2, "access_mode": "public", "guest_policy": "none",
+            },
+            headers={"Authorization": f"Bearer {host_token}"},
+        )
+        assert r.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_direct_message_rejects_profane_body(self, client, city_id):
+        a_id, a_token = await _make_user(city_id, "DmA")
+        b_id, b_token = await _make_user(city_id, "DmB")
+        a, b = sorted((a_id, b_id), key=str)
+        async with async_session() as db:
+            db.add(Friendship(user_id_a=a, user_id_b=b, status="accepted", requested_by=a_id))
+            await db.commit()
+        r = await client.post(f"/chat/{b_id}/messages", json={"body": "you fucking idiot"}, headers={"Authorization": f"Bearer {a_token}"})
+        assert r.status_code == 400
+
+
+class TestBlockedUsersAndEvents:
+    """
+    Regression coverage for this pass's fix: blocking must be a real
+    barrier against contact via events (join/attend/chat), not just
+    profile/DM/discovery — see app/routers/events.py's
+    _assert_no_block_conflict and its call sites.
+    """
+
+    @pytest.mark.asyncio
+    async def test_blocked_user_cannot_join_hosts_event(self, client, city_id):
+        host_id, host_token = await _make_user(city_id, "EvBlockHost")
+        joiner_id, joiner_token = await _make_user(city_id, "EvBlockJoiner")
+        event_id = await _make_event(client, host_token, capacity=5)
+        await client.post(f"/users/{joiner_id}/block", headers={"Authorization": f"Bearer {host_token}"})
+
+        r = await client.post(f"/events/{event_id}/join", headers={"Authorization": f"Bearer {joiner_token}"})
+        assert r.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_blocked_user_cannot_join_event_with_existing_blocked_attendee(self, client, city_id):
+        """Block conflict with an ORDINARY attendee, not just the host."""
+        host_id, host_token = await _make_user(city_id, "EvBlockHost2")
+        attendee_id, attendee_token = await _make_user(city_id, "EvBlockAttendee")
+        joiner_id, joiner_token = await _make_user(city_id, "EvBlockJoiner2")
+        event_id = await _make_event(client, host_token, capacity=5)
+        await client.post(f"/events/{event_id}/join", headers={"Authorization": f"Bearer {attendee_token}"})
+        await client.post(f"/users/{joiner_id}/block", headers={"Authorization": f"Bearer {attendee_token}"})
+
+        r = await client.post(f"/events/{event_id}/join", headers={"Authorization": f"Bearer {joiner_token}"})
+        assert r.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_blocked_user_cannot_request_to_join_approval_event(self, client, city_id):
+        host_id, host_token = await _make_user(city_id, "EvBlockApprovalHost")
+        requester_id, requester_token = await _make_user(city_id, "EvBlockRequester")
+        event_id = await _make_event(client, host_token, capacity=5, access_mode="approval")
+        await client.post(f"/users/{requester_id}/block", headers={"Authorization": f"Bearer {host_token}"})
+
+        r = await client.post(f"/events/{event_id}/join-requests", json={}, headers={"Authorization": f"Bearer {requester_token}"})
+        assert r.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_blocked_user_cannot_join_waitlist(self, client, city_id):
+        host_id, host_token = await _make_user(city_id, "EvBlockWlHost")
+        joiner_id, joiner_token = await _make_user(city_id, "EvBlockWlJoiner")
+        event_id = await _make_event(client, host_token, capacity=5)
+        await client.post(f"/users/{joiner_id}/block", headers={"Authorization": f"Bearer {host_token}"})
+
+        r = await client.post(f"/events/{event_id}/waitlist", headers={"Authorization": f"Bearer {joiner_token}"})
+        assert r.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_existing_attendance_is_preserved_after_a_later_block(self, client, city_id):
+        """
+        A block that happens AFTER both people are already attending must
+        NOT retroactively remove either of them — see
+        _assert_no_block_conflict's docstring for why this is
+        query-time prevention, not a cleanup job.
+        """
+        host_id, host_token = await _make_user(city_id, "EvBlockPreserveHost")
+        attendee_id, attendee_token = await _make_user(city_id, "EvBlockPreserveAttendee")
+        event_id = await _make_event(client, host_token, capacity=5)
+        join = await client.post(f"/events/{event_id}/join", headers={"Authorization": f"Bearer {attendee_token}"})
+        assert join.status_code == 200
+
+        await client.post(f"/users/{attendee_id}/block", headers={"Authorization": f"Bearer {host_token}"})
+
+        async with async_session() as db:
+            rows = (await db.scalars(
+                select(EventParticipant).where(EventParticipant.event_id == uuid.UUID(event_id), EventParticipant.status == "going")
+            )).all()
+            user_ids = {r.user_id for r in rows}
+            assert host_id in user_ids and attendee_id in user_ids
+
+    @pytest.mark.asyncio
+    async def test_blocked_attendees_cannot_chat_even_if_both_already_attending(self, client, city_id):
+        """
+        The residual case join-time checks can't prevent: both were
+        already attending before either blocked the other. Attendance
+        stays; NEW chat messages between them stop.
+        """
+        host_id, host_token = await _make_user(city_id, "EvBlockChatHost")
+        attendee_id, attendee_token = await _make_user(city_id, "EvBlockChatAttendee")
+        event_id = await _make_event(client, host_token, capacity=5)
+        await client.post(f"/events/{event_id}/join", headers={"Authorization": f"Bearer {attendee_token}"})
+
+        pre = await client.post(f"/events/{event_id}/chat", json={"body": "hello before block"}, headers={"Authorization": f"Bearer {attendee_token}"})
+        assert pre.status_code == 201
+
+        await client.post(f"/users/{attendee_id}/block", headers={"Authorization": f"Bearer {host_token}"})
+
+        post_attendee = await client.post(f"/events/{event_id}/chat", json={"body": "hello after block"}, headers={"Authorization": f"Bearer {attendee_token}"})
+        assert post_attendee.status_code == 403
+        post_host = await client.post(f"/events/{event_id}/chat", json={"body": "hello from host"}, headers={"Authorization": f"Bearer {host_token}"})
+        assert post_host.status_code == 403
+
+
+class TestReporting:
+    """
+    Regression coverage for report_user (new) and report_event (now
+    wired to the frontend + deduped) — see app/reports.py.
+    """
+
+    @pytest.mark.asyncio
+    async def test_report_user_success_and_stores_correct_target(self, client, city_id):
+        reporter_id, reporter_token = await _make_user(city_id, "ReportReporter")
+        target_id, _ = await _make_user(city_id, "ReportTarget")
+        r = await client.post(f"/users/{target_id}/report", json={"reason": "Harassment or abuse", "details": "sent unwanted messages"}, headers={"Authorization": f"Bearer {reporter_token}"})
+        assert r.status_code == 201, r.text
+        assert r.json()["status"] == "reported"
+        async with async_session() as db:
+            row = await db.scalar(select(Report).where(Report.reporter_id == reporter_id, Report.target_id == target_id))
+            assert row is not None
+            assert row.target_type == "user"
+            assert row.reason == "Harassment or abuse"
+
+    @pytest.mark.asyncio
+    async def test_report_user_rejects_nonexistent_target_id(self, client, city_id):
+        """IDOR check: an arbitrary/nonexistent UUID must not silently create a report."""
+        _, reporter_token = await _make_user(city_id, "ReportIdorReporter")
+        fake_id = uuid.uuid4()
+        r = await client.post(f"/users/{fake_id}/report", json={"reason": "Spam"}, headers={"Authorization": f"Bearer {reporter_token}"})
+        assert r.status_code == 404
+        async with async_session() as db:
+            row = await db.scalar(select(Report).where(Report.target_id == fake_id))
+            assert row is None
+
+    @pytest.mark.asyncio
+    async def test_report_user_rejects_self_report(self, client, city_id):
+        user_id, token = await _make_user(city_id, "ReportSelf")
+        r = await client.post(f"/users/{user_id}/report", json={"reason": "Spam"}, headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_duplicate_report_is_deduped_not_double_written(self, client, city_id):
+        reporter_id, reporter_token = await _make_user(city_id, "ReportDupeReporter")
+        target_id, _ = await _make_user(city_id, "ReportDupeTarget")
+        first = await client.post(f"/users/{target_id}/report", json={"reason": "Spam"}, headers={"Authorization": f"Bearer {reporter_token}"})
+        assert first.json()["status"] == "reported"
+        second = await client.post(f"/users/{target_id}/report", json={"reason": "Spam again"}, headers={"Authorization": f"Bearer {reporter_token}"})
+        assert second.status_code == 201
+        assert second.json()["status"] == "already_reported"
+        async with async_session() as db:
+            rows = (await db.scalars(select(Report).where(Report.reporter_id == reporter_id, Report.target_id == target_id))).all()
+            assert len(rows) == 1
+
+    @pytest.mark.asyncio
+    async def test_report_event_success(self, client, city_id):
+        reporter_id, reporter_token = await _make_user(city_id, "ReportEventReporter")
+        _, host_token = await _make_user(city_id, "ReportEventHost")
+        event_id = await _make_event(client, host_token, capacity=5)
+        r = await client.post(f"/events/{event_id}/report", json={"reason": "Misleading"}, headers={"Authorization": f"Bearer {reporter_token}"})
+        assert r.status_code == 201, r.text
+        assert r.json()["status"] == "reported"
+
+    @pytest.mark.asyncio
+    async def test_report_event_rejects_nonexistent_event(self, client, city_id):
+        _, reporter_token = await _make_user(city_id, "ReportEventIdor")
+        fake_id = uuid.uuid4()
+        r = await client.post(f"/events/{fake_id}/report", json={"reason": "Spam"}, headers={"Authorization": f"Bearer {reporter_token}"})
+        assert r.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_report_event_rejects_self_report_by_host(self, client, city_id):
+        """Consistency with test_report_user_rejects_self_report above — a host can't report their own event."""
+        _, host_token = await _make_user(city_id, "ReportEventSelfHost")
+        event_id = await _make_event(client, host_token, capacity=5)
+        r = await client.post(f"/events/{event_id}/report", json={"reason": "Spam"}, headers={"Authorization": f"Bearer {host_token}"})
+        assert r.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_report_response_never_includes_reporter_identity(self, client, city_id):
+        """Nothing in the response should echo reporter-identifying data back."""
+        _, reporter_token = await _make_user(city_id, "ReportPrivacy")
+        target_id, _ = await _make_user(city_id, "ReportPrivacyTarget")
+        r = await client.post(f"/users/{target_id}/report", json={"reason": "Spam"}, headers={"Authorization": f"Bearer {reporter_token}"})
+        assert set(r.json().keys()) == {"status"}
+
+
+class TestPostsBlocking:
+    """/posts/nearby now requires auth and excludes blocked users — see app/routers/posts.py."""
+
+    @pytest.mark.asyncio
+    async def test_nearby_posts_requires_authentication(self, client):
+        r = await client.get("/posts/nearby", params={"lat": 54.69, "lng": 25.28})
+        assert r.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_nearby_posts_excludes_blocked_users_posts(self, client, city_id):
+        poster_id, poster_token = await _make_user(city_id, "PostBlockedPoster")
+        viewer_id, viewer_token = await _make_user(city_id, "PostBlockViewer")
+
+        create = await client.post("/posts", json={"body": "Unique nearby post marker", "latitude": 54.69, "longitude": 25.28, "expires_in_minutes": 60}, headers={"Authorization": f"Bearer {poster_token}"})
+        assert create.status_code == 201, create.text
+
+        before = await client.get("/posts/nearby", params={"lat": 54.69, "lng": 25.28, "radius_km": 50}, headers={"Authorization": f"Bearer {viewer_token}"})
+        assert any(p["body"] == "Unique nearby post marker" for p in before.json())
+
+        await client.post(f"/users/{poster_id}/block", headers={"Authorization": f"Bearer {viewer_token}"})
+
+        after = await client.get("/posts/nearby", params={"lat": 54.69, "lng": 25.28, "radius_km": 50}, headers={"Authorization": f"Bearer {viewer_token}"})
+        assert all(p["body"] != "Unique nearby post marker" for p in after.json())
+
+    @pytest.mark.asyncio
+    async def test_nearby_posts_excludes_own_posts_from_blocker_side_too(self, client, city_id):
+        """Reverse direction: the VIEWER being blocked by the poster also excludes them (blocked_ids is bidirectional)."""
+        poster_id, poster_token = await _make_user(city_id, "PostReverseBlockPoster")
+        viewer_id, viewer_token = await _make_user(city_id, "PostReverseBlockViewer")
+
+        create = await client.post("/posts", json={"body": "Reverse block marker post", "latitude": 54.69, "longitude": 25.28, "expires_in_minutes": 60}, headers={"Authorization": f"Bearer {poster_token}"})
+        assert create.status_code == 201, create.text
+
+        # poster blocks viewer (not the other direction)
+        await client.post(f"/users/{viewer_id}/block", headers={"Authorization": f"Bearer {poster_token}"})
+
+        result = await client.get("/posts/nearby", params={"lat": 54.69, "lng": 25.28, "radius_km": 50}, headers={"Authorization": f"Bearer {viewer_token}"})
+        assert all(p["body"] != "Reverse block marker post" for p in result.json())

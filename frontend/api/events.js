@@ -135,6 +135,15 @@ export async function banUser(eventId, userId, reason) {
   return apiClient.post(`/events/${eventId}/ban`, { user_id: userId, reason });
 }
 
+/**
+ * Report an event for moderation review. Existed backend-only until
+ * this pass — nothing in the UI ever called it.
+ * @param {string} eventId @param {string} reason @param {string} [details]
+ */
+export async function reportEvent(eventId, reason, details) {
+  return apiClient.post(`/events/${eventId}/report`, { reason, details: details || null });
+}
+
 // ---------- check-in ----------
 // Real, signed, time-limited tokens as of this pass (see backend
 // app/routers/events.py's module docstring for why the old

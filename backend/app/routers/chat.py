@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.deps import get_current_user, require_verified_user
 from app.models import DirectMessage, User
+from app.moderation import is_inappropriate
 from app.routers.friends import is_friends_with
 from app.schemas import ChatMessageCreate
 from app.ws import ChatConnectionManager
@@ -166,6 +167,13 @@ async def send_message(
     user: User = Depends(require_verified_user), db: AsyncSession = Depends(get_db),
 ):
     await _require_friend(db, user, friend_user_id)
+    # This was previously the one free-text field strangers-turned-friends
+    # actually exchange that had zero moderation on it at all — nickname
+    # and bio were covered, DMs weren't. Free text, so no despace=True
+    # (see moderation.py's docstring for why that's bio-like, not
+    # nickname-like).
+    if is_inappropriate(payload.body):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Please remove inappropriate language from your message")
 
     msg = DirectMessage(sender_id=user.id, recipient_id=friend_user_id, body=payload.body)
     db.add(msg)

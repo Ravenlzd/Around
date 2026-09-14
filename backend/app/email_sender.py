@@ -86,3 +86,17 @@ def send_signup_otp_email(to: str, code: str) -> None:
             "This code expires in 10 minutes. If you didn't try to sign up for Around, you can ignore this email.\n"
         ),
     )
+
+
+def send_password_reset_otp_email(to: str, code: str) -> None:
+    """Same code-in-body-never-a-link rationale as send_signup_otp_email above."""
+    send_email(
+        to=to,
+        subject="Your Around password reset code",
+        body=(
+            "Use this code to reset your Around password:\n\n"
+            f"{code}\n\n"
+            "This code expires in 10 minutes and can only be used once. "
+            "If you didn't request a password reset, you can safely ignore this email — your password hasn't been changed.\n"
+        ),
+    )

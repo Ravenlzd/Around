@@ -36,6 +36,17 @@ export async function reportProblem(message) {
   return apiClient.post("/users/me/report-problem", { message });
 }
 
+/**
+ * Report a specific member for moderation review (separate from
+ * blocking — a report is a signal to Around, a block is a personal
+ * "stop showing me this person" action; doing one doesn't imply doing
+ * the other).
+ * @param {string} userId @param {string} reason @param {string} [details]
+ */
+export async function reportUser(userId, reason, details) {
+  return apiClient.post(`/users/${encodeURIComponent(userId)}/report`, { reason, details: details || null });
+}
+
 /** @returns {Promise<{groups: Record<string,string[]>}>} the curated interest catalog, grouped for a picker UI */
 export async function getInterestCatalog() {
   return apiClient.get("/users/interests");

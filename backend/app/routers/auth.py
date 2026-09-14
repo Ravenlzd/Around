@@ -27,11 +27,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_db
-from app.email_sender import send_signup_otp_email
+from app.email_sender import send_signup_otp_email, send_password_reset_otp_email
 from app.deps import get_current_user
-from app.models import City, PendingSignup, User
+from app.models import City, PasswordReset, PendingSignup, User
 from app.moderation import is_inappropriate
-from app.schemas import LoginRequest, ResendSignupOtpRequest, SignupOtpRequest, SignupRequest, TokenResponse, UserOut
+from app.schemas import (
+    LoginRequest, RequestPasswordResetRequest, ResendSignupOtpRequest, ResetPasswordRequest,
+    SignupOtpRequest, SignupRequest, TokenResponse, UserOut,
+)
 
 router = APIRouter()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -44,10 +47,26 @@ MAX_OTP_ATTEMPTS = 5
 # what the frontend's countdown timer reflects.
 RESEND_COOLDOWN = timedelta(seconds=45)
 
+# Password reset uses the exact same TTL/attempt-cap/cooldown shape as
+# signup OTP above — same security bar, separate constants only because
+# they're conceptually a different flow's knobs, not because the values
+# actually differ today.
+RESET_OTP_TTL = timedelta(minutes=10)
+MAX_RESET_OTP_ATTEMPTS = 5
+RESET_RESEND_COOLDOWN = timedelta(seconds=45)
 
-def create_access_token(user_id: str) -> str:
+
+def create_access_token(user_id: str, password_changed_at: datetime | None = None) -> str:
     expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    return jwt.encode({"sub": user_id, "exp": expire}, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
+    claims = {"sub": user_id, "exp": expire}
+    if password_changed_at is not None:
+        # See app/deps.py::get_current_user for why this claim exists —
+        # it's what lets a password reset invalidate previously-issued
+        # tokens. Naive datetimes (as `default=datetime.utcnow` produces)
+        # are treated as UTC here, matching how they're read back.
+        pwt = password_changed_at if password_changed_at.tzinfo else password_changed_at.replace(tzinfo=timezone.utc)
+        claims["pwt"] = pwt.timestamp()
+    return jwt.encode(claims, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
 
 
 def normalize_email(email: str) -> str:
@@ -121,7 +140,7 @@ async def signup(payload: SignupRequest, db: AsyncSession = Depends(get_db)):
         db.add(user)
         await db.commit()
         await db.refresh(user)
-        return TokenResponse(access_token=create_access_token(str(user.id)))
+        return TokenResponse(access_token=create_access_token(str(user.id), user.password_changed_at))
 
     otp = await _issue_pending_signup(db, email=email, password_hash=password_hash, display_name=display_name, city_id=city.id)
     await db.commit()
@@ -165,7 +184,7 @@ async def verify_signup_otp(payload: SignupOtpRequest, db: AsyncSession = Depend
     await db.commit()
     await db.refresh(user)
 
-    return TokenResponse(access_token=create_access_token(str(user.id)))
+    return TokenResponse(access_token=create_access_token(str(user.id), user.password_changed_at))
 
 
 @router.post("/resend-signup-otp")
@@ -191,6 +210,102 @@ async def resend_signup_otp(payload: ResendSignupOtpRequest, db: AsyncSession = 
     return {"status": "otp_sent"}
 
 
+# ---------- Password reset ----------
+# Same security bar as signup OTP above: cryptographically-secure code
+# (_generate_otp), hashed at rest (_hash_secret — never the raw code),
+# short expiry, capped wrong-guess attempts, per-email resend cooldown,
+# and per-IP rate limiting (app/rate_limit.py). Uses PasswordReset, a
+# dedicated table — see its docstring in app/models.py for why this is
+# NOT folded into PendingSignup despite the identical shape.
+
+@router.post("/request-password-reset")
+async def request_password_reset(payload: RequestPasswordResetRequest, db: AsyncSession = Depends(get_db)):
+    """
+    ALWAYS returns the same generic response, whether or not the email
+    belongs to a real account — this is the account-enumeration guard
+    (spec item: "Generic response that does NOT reveal whether an email
+    exists"). An email is only actually sent when the account exists;
+    the HTTP response gives no way to tell the two cases apart, and
+    nothing about response timing is treated as meaningful here (no
+    extra work is done in the "user doesn't exist" branch to fake a
+    matching latency, but the query itself is a single indexed lookup
+    either way, not something that produces an observable timing gap
+    worth defending against separately at this MVP's threat level).
+    """
+    email = normalize_email(payload.email)
+    generic = {"status": "if_account_exists_email_sent"}
+
+    user = await db.scalar(select(User).where(func.lower(User.email) == email))
+    if not user or not user.password_hash:
+        # No account, or an OAuth-only account with no password to reset
+        # — either way, silently do nothing rather than reveal which.
+        return generic
+
+    existing = await db.scalar(select(PasswordReset).where(PasswordReset.user_id == user.id))
+    if existing:
+        wait_seconds = int(((existing.last_sent_at + RESET_RESEND_COOLDOWN) - datetime.now(timezone.utc)).total_seconds())
+        if wait_seconds > 0:
+            # Still return the generic shape — a 429 here would itself
+            # leak "an account exists and a reset was already requested
+            # recently" to anyone probing an arbitrary email address.
+            return generic
+        await db.delete(existing)
+
+    otp = _generate_otp()
+    db.add(PasswordReset(
+        user_id=user.id, otp_hash=_hash_secret(otp),
+        otp_expires_at=datetime.now(timezone.utc) + RESET_OTP_TTL,
+        attempt_count=0, last_sent_at=datetime.now(timezone.utc),
+    ))
+    await db.commit()
+
+    send_password_reset_otp_email(email, otp)  # never logged/returned — see email_sender.py
+    return generic
+
+
+@router.post("/reset-password", response_model=TokenResponse)
+async def reset_password(payload: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
+    email = normalize_email(payload.email)
+    # Same generic wording as an invalid login/OTP — never confirm or
+    # deny whether the email has an account or a pending reset.
+    generic_error = "That code is invalid or has expired. Please request a new one."
+
+    user = await db.scalar(select(User).where(func.lower(User.email) == email))
+    if not user:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, generic_error)
+
+    reset = await db.scalar(select(PasswordReset).where(PasswordReset.user_id == user.id))
+    if not reset:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, generic_error)
+    if reset.otp_expires_at < datetime.now(timezone.utc):
+        await db.delete(reset)
+        await db.commit()
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, generic_error)
+    if reset.attempt_count >= MAX_RESET_OTP_ATTEMPTS:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many attempts. Please request a new code.")
+
+    if _hash_secret(payload.otp) != reset.otp_hash:
+        reset.attempt_count += 1
+        await db.commit()
+        if reset.attempt_count >= MAX_RESET_OTP_ATTEMPTS:
+            raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many attempts. Please request a new code.")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, generic_error)
+
+    # Correct code: set the new password (reusing the exact same bcrypt
+    # context every other password path uses), bump password_changed_at
+    # (invalidates every previously-issued token — see create_access_token
+    # / get_current_user), delete the reset row (single-use — a reused or
+    # replayed code fails the lookup above the same way an expired one
+    # does), and log the user straight into a fresh, valid session.
+    user.password_hash = pwd_context.hash(payload.new_password)
+    user.password_changed_at = datetime.now(timezone.utc)
+    await db.delete(reset)
+    await db.commit()
+    await db.refresh(user)
+
+    return TokenResponse(access_token=create_access_token(str(user.id), user.password_changed_at))
+
+
 @router.post("/login", response_model=TokenResponse)
 async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)):
     email = normalize_email(payload.email)
@@ -203,7 +318,7 @@ async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Wrong email or password.")
     if user.status != "active":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "This account is no longer active.")
-    return TokenResponse(access_token=create_access_token(str(user.id)))
+    return TokenResponse(access_token=create_access_token(str(user.id), user.password_changed_at))
 
 
 @router.post("/oauth/google", response_model=TokenResponse)

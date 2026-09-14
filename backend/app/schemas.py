@@ -26,6 +26,16 @@ class ResendSignupOtpRequest(BaseModel):
     email: EmailStr
 
 
+class RequestPasswordResetRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    email: EmailStr
+    otp: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
+    new_password: str = Field(min_length=8)
+
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
@@ -68,6 +78,23 @@ class PublicUserOut(BaseModel):
 
 class ReportProblemCreate(BaseModel):
     message: str = Field(min_length=1, max_length=1000)
+
+
+class ReportSubmit(BaseModel):
+    """
+    Body for the target-scoped report endpoints (POST /users/{id}/report,
+    POST /events/{id}/report) — target_type/target_id are NOT fields
+    here on purpose: they come from the URL (validated server-side
+    against a real row of that type before app.reports.create_report is
+    ever called), never from client-supplied body fields, which is what
+    keeps a reporter from manipulating target_id to report an unrelated
+    or nonexistent object. reason is a short free-text label (matches
+    Report.reason's existing shape — the frontend offers a fixed set of
+    suggested reasons, the backend doesn't hard-enforce an enum, same
+    latitude report_event already had); details is optional elaboration.
+    """
+    reason: str = Field(min_length=1, max_length=100)
+    details: str | None = Field(default=None, max_length=1000)
 
 
 class ProfileUpdate(BaseModel):

@@ -36,12 +36,31 @@ LIMITS = {
     # caps *wrong-guess* attempts per pending signup regardless of IP);
     # this caps request volume per IP regardless of correctness.
     "/auth/verify-signup-otp": (10, 60, None),
+    # Password reset: same per-IP request-volume floor as signup's
+    # equivalents above, alongside PasswordReset.attempt_count (wrong-
+    # guess cap) and RESET_RESEND_COOLDOWN (per-email cooldown) enforced
+    # in app/routers/auth.py itself.
+    "/auth/request-password-reset": (5, 300, None),
+    "/auth/reset-password": (10, 60, None),
     # media uploads are authenticated (unlike the two above), so this
     # limits per-IP rather than the more useful per-user — good enough
     # to stop naive disk-filling abuse without adding a second limiter
     # keyed on user id for what's still a single-instance MVP.
     "/media/upload": (20, 60, None),
     "/users/me": (15, 60, "PATCH"),
+}
+
+# Path-SUFFIX limits, for endpoints identified by a variable id in the
+# middle of the path — /users/<uuid>/report and /events/<uuid>/report
+# both end in "/report" but no fixed PREFIX isolates them without also
+# throttling every other /users/* or /events/* call (which would catch
+# ordinary profile/event browsing). Checked only when no prefix rule
+# already matched. See dispatch() below for why the bucket key for a
+# suffix match is the suffix itself, not the literal request path —
+# using the literal path would let a client spam reports against many
+# different target ids, each getting its own fresh bucket.
+SUFFIX_LIMITS = {
+    "/report": (10, 300, "POST"),
 }
 
 _hits: dict[str, deque] = defaultdict(deque)
@@ -63,14 +82,21 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if settings.ENV == "testing":
             return await call_next(request)
         limit_cfg = None
+        limit_key = request.url.path
         for prefix, cfg in LIMITS.items():
             if request.url.path.startswith(prefix) and (cfg[2] is None or cfg[2] == request.method):
                 limit_cfg = cfg
                 break
+        if not limit_cfg:
+            for suffix, cfg in SUFFIX_LIMITS.items():
+                if request.url.path.endswith(suffix) and (cfg[2] is None or cfg[2] == request.method):
+                    limit_cfg = cfg
+                    limit_key = suffix  # shared bucket across every target id, not one per id
+                    break
         if limit_cfg:
             max_requests, window, _method = limit_cfg
             client_ip = request.client.host if request.client else "unknown"
-            key = f"{client_ip}:{request.url.path}"
+            key = f"{client_ip}:{limit_key}"
             now = time.monotonic()
             q = _hits[key]
             while q and now - q[0] > window:
