@@ -71,6 +71,7 @@ class PublicUserOut(BaseModel):
     # events.py already treat as the single source of truth; this isn't
     # a second friendship system, just exposing existing state here too.
     friendship_status: str = "none"
+    interests: list[str] = []
 
     class Config:
         from_attributes = True

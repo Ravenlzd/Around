@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select, delete, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.blocking import blocked_ids
 from app.database import get_db
 from app.interests import INTEREST_GROUPS, INTERESTS
 from app.models import Block, Event, EventParticipant, Friendship, Report, User, UserInterest, UserStats
@@ -130,15 +131,10 @@ async def get_public_profile(
     profile = await db.get(User, profile_id)
     if not profile or profile.status != "active":
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
-    blocked = await db.scalar(
-        select(Block).where(
-            or_(
-                (Block.blocker_id == user.id) & (Block.blocked_id == profile_id),
-                (Block.blocker_id == profile_id) & (Block.blocked_id == user.id),
-            )
-        )
-    )
-    if blocked:
+    # Consolidated onto the shared helper (was its own inline Block
+    # query) — same bidirectional semantics, now the one place every
+    # caller (discovery, events, posts, here) computes this the same way.
+    if profile_id in await blocked_ids(db, user.id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
 
     if profile_id == user.id:
@@ -155,6 +151,8 @@ async def get_public_profile(
         else:
             friendship_status = "none"
 
+    interests = (await db.scalars(select(UserInterest.interest).where(UserInterest.user_id == profile_id))).all()
+
     return {
         "id": profile.id,
         "display_name": profile.display_name,
@@ -162,6 +160,7 @@ async def get_public_profile(
         "bio": profile.bio,
         "avatar_url": profile.avatar_url,
         "friendship_status": friendship_status,
+        "interests": interests,
     }
 
 

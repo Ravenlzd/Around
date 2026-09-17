@@ -252,3 +252,39 @@ export async function isBackendReachable(timeoutMs = 1500) {
     clearTimeout(timer);
   }
 }
+
+/**
+ * Cold-start-aware backend check, built on isBackendReachable() above
+ * without changing it. A single 1.5s check (what boot() used to call
+ * directly) almost always fails against a Render free-tier instance
+ * that's spun down from inactivity — cold starts commonly take
+ * 30-60s+, so that one check would incorrectly drop straight into
+ * demo/offline mode every time the backend was merely asleep, not
+ * actually down.
+ *
+ * This retries on a fixed, non-hammering interval (one attempt every
+ * `intervalMs`, not a tight loop) until either a check succeeds or
+ * `totalTimeoutMs` elapses — at the defaults, ~19 requests total
+ * against one lightweight /health endpoint over ~75s, which is well
+ * within what a free-tier service is expected to handle and nowhere
+ * near continuous polling. `onStatusChange` lets the caller show
+ * "Checking..." then "Waking up..." without this module knowing
+ * anything about the DOM.
+ *
+ * @param {{onStatusChange?: (status: 'checking'|'waking') => void, totalTimeoutMs?: number, intervalMs?: number, attemptTimeoutMs?: number}} [opts]
+ * @returns {Promise<boolean>} true the moment any attempt succeeds, false once the whole window elapses with no success
+ */
+export async function waitForBackend(opts = {}) {
+  const { onStatusChange, totalTimeoutMs = 75000, intervalMs = 4000, attemptTimeoutMs = 4000 } = opts;
+  const start = Date.now();
+
+  if (onStatusChange) onStatusChange("checking");
+  if (await isBackendReachable(attemptTimeoutMs)) return true;
+
+  if (onStatusChange) onStatusChange("waking");
+  while (Date.now() - start < totalTimeoutMs) {
+    await new Promise(resolve => setTimeout(resolve, intervalMs));
+    if (await isBackendReachable(attemptTimeoutMs)) return true;
+  }
+  return false;
+}

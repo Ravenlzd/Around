@@ -1,4 +1,4 @@
-import { apiClient, ApiError, isBackendReachable } from './api/client.js';
+import { apiClient, ApiError, waitForBackend } from './api/client.js';
 import * as AuthApi from './api/auth.js';
 import * as EventsApi from './api/events.js';
 import * as UsersApi from './api/users.js';
@@ -328,7 +328,18 @@ function dismissInstallBanner(){
 async function boot() {
   registerServiceWorker();
   wireAuthScreen();
-  backendReachable = await isBackendReachable();
+  // Render's free tier spins down after inactivity — a cold start can
+  // take 30-60s+, so waitForBackend() retries instead of the single
+  // quick check isBackendReachable() alone would do (see client.js).
+  // bootStatus drives the "Checking..." / "Waking up..." screen in
+  // renderAuthScreen() while this is in flight; demo/offline mode is
+  // only offered once the whole retry window is exhausted, same as before.
+  bootStatus = 'checking';
+  renderAuthScreen();
+  backendReachable = await waitForBackend({
+    onStatusChange: (s) => { bootStatus = s; renderAuthScreen(); },
+  });
+  bootStatus = null;
   if (!backendReachable) {
     renderAuthScreen(); // re-render with the "backend unreachable" notice now that we know
     showScreen('auth');
@@ -469,6 +480,7 @@ function showScreen(which) {
 function wireAuthScreen(){ renderAuthScreen(); }
 
 let backendReachable = null; // null = not checked yet, true/false after boot()'s health check
+let bootStatus = null; // null | 'checking' | 'waking' — transient cold-start state while waitForBackend() is retrying; see boot() and renderAuthScreen()
 
 function maskEmail(email){
   const at = email.indexOf('@');
@@ -478,6 +490,25 @@ function maskEmail(email){
 
 function renderAuthScreen(){
   const el = document.getElementById('authContent');
+
+  // Cold-start check in progress (see boot()/waitForBackend) — a
+  // dedicated screen, not just a small notice bolted onto the login
+  // form, per the "don't make users think the server is permanently
+  // broken" goal. No demo-mode offer here on purpose: that only shows
+  // up once the retry window in waitForBackend() actually exhausts
+  // (bootStatus back to null with backendReachable===false below) —
+  // offering it earlier would undercut the whole point of retrying.
+  if (bootStatus === 'checking' || bootStatus === 'waking') {
+    el.innerHTML = `
+      <div class="auth-brand"><span class="dot"></span>Around</div>
+      <div style="margin-top:60px; text-align:center;">
+        <div class="profile-name" style="font-size:19px;">${bootStatus === 'waking' ? "Waking Around's server…" : 'Checking Around server…'}</div>
+        <div class="auth-tag" style="margin-top:10px;">${bootStatus === 'waking' ? "This can take up to a minute on our free hosting tier — hang tight, it's on its way." : ''}</div>
+      </div>
+    `;
+    return;
+  }
+
   const mode = state.authMode;
   const offlineNotice = backendReachable === false ? `
     <div class="offline-notice">
@@ -997,14 +1028,30 @@ function eventCardHtml(ev){
   </div>`;
 }
 function postCardHtml(p){
-  const user = p.user_name || p.user || 'Someone';
+  const name = p.display_name || p.user_name || p.user || 'Someone';
+  const avatarInner = p.avatar_url
+    ? `<img src="${MediaApi.absoluteMediaUrl(p.avatar_url)}" alt="" style="width:100%; height:100%; object-fit:cover; border-radius:50%;" onerror="this.replaceWith(Object.assign(document.createElement('span'),{textContent:'${escapeHtml(initials(name))}'}))"/>`
+    : escapeHtml(initials(name));
+  const avatarHtml = `<div class="av-round" style="background:${avColor(name)}20; color:${avColor(name)}; overflow:hidden;">${avatarInner}</div>`;
+  const nameHtml = `<div class="name">${escapeHtml(name)}</div>`;
+  // Only real backend posts carry user_id (demo/sample posts don't —
+  // see DEMO_POSTS — so those stay inert rather than opening a profile
+  // for an id that doesn't exist). Avatar + name are wrapped together
+  // as ONE clickable target, same pattern as the event-attendee chip
+  // (see .pchip.person-link) — deliberately NOT the whole .post-card,
+  // so tapping the post body/timestamp never accidentally opens a
+  // profile. openUserProfile() is the same public-profile sheet used
+  // everywhere else in the app (Discover, attendees, friends list) —
+  // no separate "Quick Post profile" exists.
+  const authorHtml = p.user_id
+    ? `<div class="post-author" onclick="AroundApp.openUserProfile('${p.user_id}')" style="display:flex; align-items:center; gap:8px; cursor:pointer; margin:-6px 0; padding:6px 8px 6px 0; border-radius:10px;">${avatarHtml}${nameHtml}</div>`
+    : `<div class="post-author" style="display:flex; align-items:center; gap:8px;">${avatarHtml}${nameHtml}</div>`;
   return `<div class="post-card">
     <div class="row1">
-      <div class="av-round" style="background:${avColor(user)}20; color:${avColor(user)}">${initials(user)}</div>
-      <div class="name">${user}</div>
+      ${authorHtml}
       <div class="exp">${p.expires_at ? 'expires ' + new Date(p.expires_at).toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'}) : ''}</div>
     </div>
-    <div class="txt">${p.body || p.text || ''}</div>
+    <div class="txt">${escapeHtml(p.body || p.text || '')}</div>
   </div>`;
 }
 
@@ -1537,6 +1584,7 @@ async function openUserProfile(userId, sourceEventId){
         <div class="profile-name">${escapeHtml(profile.display_name)}</div>
         <div class="profile-loc">${profile.university_or_work ? escapeHtml(profile.university_or_work) : ''}</div>
         ${profile.bio ? `<div class="ed-desc">${escapeHtml(profile.bio)}</div>` : ''}
+        ${(profile.interests && profile.interests.length) ? `<div class="profile-interests">${profile.interests.map(i => `<span>${escapeHtml(i)}</span>`).join('')}</div>` : ''}
         ${renderFriendAction(profile.friendship_status, userId, profile.display_name)}
         ${isSelf ? '' : `
           <div style="display:flex; gap:8px; justify-content:center; margin-top:18px;">

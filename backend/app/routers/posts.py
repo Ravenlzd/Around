@@ -67,17 +67,35 @@ async def nearby_posts(
     conditions = [
         SpontaneousPost.expires_at > datetime.now(timezone.utc),
         distance_m <= radius_km * 1000,
+        # A post's author row is never hard-deleted (soft-delete via
+        # User.status only), so this can't silently drop a row via the
+        # join below going unmatched — it deliberately excludes posts
+        # from a suspended/deleted account, the same "author unavailable"
+        # rule get_public_profile() already enforces for /users/{id}.
+        User.status == "active",
     ]
     if excluded_ids:
         conditions.append(SpontaneousPost.user_id.notin_(excluded_ids))
+    # Author identity, added this pass (spec: tapping a Quick Post's
+    # author should open their profile — previously there was nothing
+    # here to link to; the frontend fell back to a hardcoded "Someone").
+    # Only display_name/avatar_url/user_id — the exact subset
+    # GET /users/{id} (the existing public-profile endpoint) already
+    # shows to any signed-in viewer regardless of relationship; nothing
+    # more sensitive (bio, university, email, location) is added here,
+    # and that endpoint remains the only place those live.
     stmt = (
-        select(SpontaneousPost, (distance_m / 1000).label("distance_km"))
+        select(SpontaneousPost, (distance_m / 1000).label("distance_km"), User.display_name, User.avatar_url)
+        .join(User, User.id == SpontaneousPost.user_id)
         .where(*conditions)
         .order_by(SpontaneousPost.created_at.desc())
         .limit(50)
     )
     rows = (await db.execute(stmt)).all()
     return [
-        {"id": str(p.id), "body": p.body, "distance_km": round(d, 2), "expires_at": p.expires_at.isoformat()}
-        for p, d in rows
+        {
+            "id": str(p.id), "body": p.body, "distance_km": round(d, 2), "expires_at": p.expires_at.isoformat(),
+            "user_id": str(p.user_id), "display_name": display_name, "avatar_url": avatar_url,
+        }
+        for p, d, display_name, avatar_url in rows
     ]

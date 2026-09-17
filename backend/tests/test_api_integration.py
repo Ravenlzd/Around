@@ -169,6 +169,18 @@ class TestProfiles:
         assert response.status_code == 200, response.text
         assert response.json() == {"upcoming": 1, "hosting": 1, "friends": 1}
 
+    @pytest.mark.asyncio
+    async def test_public_profile_includes_interests(self, client, city_id):
+        """Quick Post author profiles (and every other caller of GET /users/{id}) now surface interests — was missing entirely."""
+        target_id, target_token = await _make_user(city_id, "Interests Target")
+        set_r = await client.patch("/users/me", json={"interests": ["Basketball", "Hiking"]}, headers={"Authorization": f"Bearer {target_token}"})
+        assert set_r.status_code == 200, set_r.text
+
+        _, viewer_token = await _make_user(city_id, "Interests Viewer")
+        r = await client.get(f"/users/{target_id}", headers={"Authorization": f"Bearer {viewer_token}"})
+        assert r.status_code == 200, r.text
+        assert set(r.json()["interests"]) == {"Basketball", "Hiking"}
+
 
 class TestImFree:
     @pytest.mark.asyncio
@@ -939,3 +951,36 @@ class TestPostsBlocking:
 
         result = await client.get("/posts/nearby", params={"lat": 54.69, "lng": 25.28, "radius_km": 50}, headers={"Authorization": f"Bearer {viewer_token}"})
         assert all(p["body"] != "Reverse block marker post" for p in result.json())
+
+    @pytest.mark.asyncio
+    async def test_nearby_posts_include_author_identity_for_profile_linking(self, client, city_id):
+        """Quick Post author tap-through (spec: avatar/name -> public profile) needs user_id + display_name + avatar_url on each post."""
+        poster_id, poster_token = await _make_user(city_id, "PostAuthorIdentity")
+        _, viewer_token = await _make_user(city_id, "PostAuthorViewer")
+        create = await client.post("/posts", json={"body": "Author identity marker post", "latitude": 54.69, "longitude": 25.28, "expires_in_minutes": 60}, headers={"Authorization": f"Bearer {poster_token}"})
+        assert create.status_code == 201, create.text
+
+        result = await client.get("/posts/nearby", params={"lat": 54.69, "lng": 25.28, "radius_km": 50}, headers={"Authorization": f"Bearer {viewer_token}"})
+        post = next(p for p in result.json() if p["body"] == "Author identity marker post")
+        assert post["user_id"] == str(poster_id)
+        assert post["display_name"] == "PostAuthorIdentity"
+        assert "avatar_url" in post
+        # No fields beyond what GET /users/{id} (the existing public
+        # profile endpoint) already exposes to anyone — e.g. no email,
+        # no exact location.
+        assert "email" not in post
+
+    @pytest.mark.asyncio
+    async def test_nearby_posts_excludes_posts_from_suspended_author(self, client, city_id):
+        poster_id, poster_token = await _make_user(city_id, "PostSuspendedAuthor")
+        _, viewer_token = await _make_user(city_id, "PostSuspendedViewer")
+        create = await client.post("/posts", json={"body": "Suspended author marker post", "latitude": 54.69, "longitude": 25.28, "expires_in_minutes": 60}, headers={"Authorization": f"Bearer {poster_token}"})
+        assert create.status_code == 201, create.text
+
+        async with async_session() as db:
+            user = await db.get(User, poster_id)
+            user.status = "suspended"
+            await db.commit()
+
+        result = await client.get("/posts/nearby", params={"lat": 54.69, "lng": 25.28, "radius_km": 50}, headers={"Authorization": f"Bearer {viewer_token}"})
+        assert all(p["body"] != "Suspended author marker post" for p in result.json())
