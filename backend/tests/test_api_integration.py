@@ -734,6 +734,87 @@ class TestBlockingAndModeration:
         assert r.status_code == 400
 
 
+class TestBlockedUsersList:
+    """
+    Profile -> Blocked People (GET /users/me/blocked) — previously a
+    hardcoded toast with no endpoint behind it at all; see
+    app/routers/users.py::list_blocked_users.
+    """
+
+    @pytest.mark.asyncio
+    async def test_empty_when_nothing_blocked(self, client, city_id):
+        _, token = await _make_user(city_id, "BlockedListEmpty")
+        r = await client.get("/users/me/blocked", headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 200, r.text
+        assert r.json() == []
+
+    @pytest.mark.asyncio
+    async def test_lists_users_i_blocked_with_expected_fields(self, client, city_id):
+        blocker_id, blocker_token = await _make_user(city_id, "BlockedListBlocker")
+        target_id, _ = await _make_user(city_id, "BlockedListTarget")
+        block_r = await client.post(f"/users/{target_id}/block", headers={"Authorization": f"Bearer {blocker_token}"})
+        assert block_r.status_code == 201, block_r.text
+
+        r = await client.get("/users/me/blocked", headers={"Authorization": f"Bearer {blocker_token}"})
+        assert r.status_code == 200, r.text
+        rows = r.json()
+        assert len(rows) == 1
+        assert rows[0]["user_id"] == str(target_id)
+        assert rows[0]["display_name"] == "BlockedListTarget"
+        assert set(rows[0].keys()) == {"user_id", "display_name", "avatar_url"}
+
+    @pytest.mark.asyncio
+    async def test_does_not_expose_the_reverse_direction(self, client, city_id):
+        """A blocks B: A's list contains B. B's list must NOT contain A (who-blocked-me is never exposed)."""
+        a_id, a_token = await _make_user(city_id, "BlockedListA")
+        b_id, b_token = await _make_user(city_id, "BlockedListB")
+        await client.post(f"/users/{b_id}/block", headers={"Authorization": f"Bearer {a_token}"})
+
+        a_list = await client.get("/users/me/blocked", headers={"Authorization": f"Bearer {a_token}"})
+        assert [row["user_id"] for row in a_list.json()] == [str(b_id)]
+
+        b_list = await client.get("/users/me/blocked", headers={"Authorization": f"Bearer {b_token}"})
+        assert b_list.json() == []
+
+    @pytest.mark.asyncio
+    async def test_requires_authentication(self, client):
+        r = await client.get("/users/me/blocked")
+        assert r.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_full_block_then_unblock_cycle(self, client, city_id):
+        blocker_id, blocker_token = await _make_user(city_id, "BlockedListCycleBlocker")
+        target_id, _ = await _make_user(city_id, "BlockedListCycleTarget")
+
+        await client.post(f"/users/{target_id}/block", headers={"Authorization": f"Bearer {blocker_token}"})
+        appears = await client.get("/users/me/blocked", headers={"Authorization": f"Bearer {blocker_token}"})
+        assert str(target_id) in [row["user_id"] for row in appears.json()]
+
+        unblock_r = await client.delete(f"/users/{target_id}/block", headers={"Authorization": f"Bearer {blocker_token}"})
+        assert unblock_r.status_code == 200, unblock_r.text
+
+        after = await client.get("/users/me/blocked", headers={"Authorization": f"Bearer {blocker_token}"})
+        assert after.json() == []
+
+        # Existing blocking behavior is genuinely undone, not just absent
+        # from this list — e.g. the target is visible again in the
+        # blocker's public-profile lookup.
+        profile_r = await client.get(f"/users/{target_id}", headers={"Authorization": f"Bearer {blocker_token}"})
+        assert profile_r.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_multiple_blocked_users_all_listed(self, client, city_id):
+        blocker_id, blocker_token = await _make_user(city_id, "BlockedListMulti")
+        target_ids = []
+        for i in range(3):
+            tid, _ = await _make_user(city_id, f"BlockedListMultiTarget{i}")
+            target_ids.append(tid)
+            await client.post(f"/users/{tid}/block", headers={"Authorization": f"Bearer {blocker_token}"})
+
+        r = await client.get("/users/me/blocked", headers={"Authorization": f"Bearer {blocker_token}"})
+        assert {row["user_id"] for row in r.json()} == {str(t) for t in target_ids}
+
+
 class TestBlockedUsersAndEvents:
     """
     Regression coverage for this pass's fix: blocking must be a real

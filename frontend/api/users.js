@@ -31,6 +31,15 @@ export async function unblockUser(userId) {
   return apiClient.delete(`/users/${encodeURIComponent(userId)}/block`);
 }
 
+/**
+ * Users the CURRENT account has blocked (never the reverse — see
+ * backend/app/routers/users.py's list_blocked_users docstring).
+ * @returns {Promise<Array<{user_id: string, display_name: string, avatar_url: string|null}>>}
+ */
+export async function listBlockedUsers() {
+  return apiClient.get("/users/me/blocked");
+}
+
 /** @param {string} message */
 export async function reportProblem(message) {
   return apiClient.post("/users/me/report-problem", { message });

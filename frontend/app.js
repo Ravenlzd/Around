@@ -1454,6 +1454,57 @@ async function openFriendsList(){
 }
 
 /* ============================================================
+   BLOCKED PEOPLE (Profile -> Blocked users)
+
+   Previously a hardcoded `toast('User blocked list — empty')` with no
+   real data behind it at all — this is that missing screen. Users this
+   account has blocked (never the reverse — see
+   backend/app/routers/users.py::list_blocked_users). Reuses the same
+   .conversation-item row styling as the Friends list above and the DM
+   conversation list, just with an Unblock action instead of an
+   open-chat click — tapping the row itself does nothing on purpose
+   (spec: don't require opening a profile to unblock someone).
+   ============================================================ */
+async function openBlockedUsersList(){
+  document.getElementById('blockedUsersContent').innerHTML = `<div class="empty-mini" style="padding:20px;">Loading…</div>`;
+  openSheet('sheetBlockedUsers');
+  try {
+    const blocked = await UsersApi.listBlockedUsers();
+    renderBlockedUsersList(blocked);
+  } catch (err) {
+    document.getElementById('blockedUsersContent').innerHTML = `<div class="empty-state"><div class="e">⚠️</div><div class="t">Couldn't load your blocked list right now.</div></div>`;
+    handleApiError(err);
+  }
+}
+function renderBlockedUsersList(blocked){
+  const el = document.getElementById('blockedUsersContent');
+  el.innerHTML = (blocked && blocked.length) ? blocked.map(b => {
+    const avatar = b.avatar_url
+      ? `<img src="${MediaApi.absoluteMediaUrl(b.avatar_url)}" alt=""/>`
+      : escapeHtml(initials(b.display_name));
+    return `<div class="conversation-item" data-blocked-id="${b.user_id}" style="cursor:default;">
+      <div class="cav" style="background:${avColor(b.display_name)}30; color:${avColor(b.display_name)}">${avatar}</div>
+      <div class="cbody"><div class="cname">${escapeHtml(b.display_name)}</div></div>
+      <button style="flex-shrink:0; padding:10px 16px; border-radius:100px; background:var(--surface-2); border:1px solid var(--border); font-weight:700; font-size:12px; color:var(--text-dim);" onclick="AroundApp.unblockFromList('${b.user_id}', this)">Unblock</button>
+    </div>`;
+  }).join('') : `<div class="empty-state"><div class="e">🚫</div><div class="t">You haven't blocked anyone.</div></div>`;
+}
+async function unblockFromList(userId, btn){
+  if (blockedInDemo()) return;
+  await withBusy(btn, async () => {
+    try {
+      await UsersApi.unblockUser(userId);
+      const row = document.querySelector(`#blockedUsersContent [data-blocked-id="${userId}"]`);
+      if (row) row.remove();
+      if (!document.querySelector('#blockedUsersContent [data-blocked-id]')) {
+        document.getElementById('blockedUsersContent').innerHTML = `<div class="empty-state"><div class="e">🚫</div><div class="t">You haven't blocked anyone.</div></div>`;
+      }
+      toast('Unblocked');
+    } catch (err) { handleApiError(err, "Couldn't unblock right now"); }
+  });
+}
+
+/* ============================================================
    EDIT PROFILE (avatar, nickname, bio, university, interests)
 
    All fields go through the existing PATCH /users/me — no new profile
@@ -2721,6 +2772,7 @@ window.AroundApp = {
   joinWaitlist, leaveWaitlist, claimWaitlistOffer,
   inviteGuestSubmit, cancelMyGuest, sendChat, selfCheckIn, openQrScanner, closeQrScanner,
   openFriendsList, openEditProfile, toggleInterest, filterInterestPicker, saveEditProfile,
+  openBlockedUsersList, unblockFromList,
   openDmThread, closeDmThread, sendDmMessage,
   triggerInstallPrompt, dismissInstallBanner,
 };

@@ -46,7 +46,7 @@ goes through, just with one extra boolean check.
 import uuid
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession  # type: ignore[import-not-found]
 
 from app.models import Report
 

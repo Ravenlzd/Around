@@ -211,6 +211,37 @@ async def unblock_user(user_id: str, user: User = Depends(get_current_user), db:
     return {"status": "unblocked"}
 
 
+@router.get("/me/blocked")
+async def list_blocked_users(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """
+    Backs Profile -> Blocked People — previously a hardcoded
+    `toast('User blocked list — empty')` in the frontend with no real
+    endpoint behind it at all, so the row always looked empty no matter
+    who you'd actually blocked.
+
+    Deliberately `Block.blocker_id == user.id` — users THIS account has
+    blocked, never the reverse. Who has blocked *you* is never exposed
+    anywhere in this API; surfacing that would let someone work out a
+    block happened on the other side, which the rest of this app
+    (get_public_profile, discovery, etc.) is careful never to reveal.
+
+    No path parameter at all — same "safest possible shape" already
+    used by /me/stats and /me/interests — so there's no id to swap out
+    to read another account's block list; it's structurally always the
+    caller's own.
+    """
+    rows = (await db.execute(
+        select(Block.blocked_id, User.display_name, User.avatar_url)
+        .join(User, User.id == Block.blocked_id)
+        .where(Block.blocker_id == user.id)
+        .order_by(Block.created_at.desc())
+    )).all()
+    return [
+        {"user_id": str(blocked_id), "display_name": display_name, "avatar_url": avatar_url}
+        for blocked_id, display_name, avatar_url in rows
+    ]
+
+
 @router.post("/{user_id}/report", status_code=status.HTTP_201_CREATED)
 async def report_user(
     user_id: str, payload: ReportSubmit,
